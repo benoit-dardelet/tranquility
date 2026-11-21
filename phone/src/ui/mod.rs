@@ -3,8 +3,11 @@
 use crate::at::{Clock, Link};
 use crate::prelude::*;
 use crate::services::{Core, Event, Transport};
+use crate::store::Storage;
 use crate::util::{self, center, char_len, pad};
 
+pub mod font;
+pub mod raster;
 pub mod screens;
 pub mod t9;
 
@@ -74,6 +77,9 @@ pub trait Screen {
     fn is_call(&self) -> bool {
         false
     }
+    fn is_alarm(&self) -> bool {
+        false
+    }
     fn thread(&self) -> Option<&str> {
         None
     }
@@ -83,14 +89,48 @@ pub struct Phone {
     pub core: Core,
     stack: Vec<Box<dyn Screen>>,
     toast: Option<(String, u64)>,
+    storage: Option<Box<dyn Storage>>,
+    pub sound: crate::audio::Audio,
+    saved: Vec<u8>,
+    last_save: u64,
+    pub restored: bool,
 }
 
 impl Phone {
     pub fn new(link: Box<dyn Link>, clock: Clock) -> Phone {
-        Phone { core: Core::new(link, clock), stack: Vec::new(), toast: None }
+        Phone { core: Core::new(link, clock), stack: Vec::new(), toast: None, sound: crate::audio::Audio::new(), storage: None, saved: Vec::new(), last_save: 0, restored: false }
+    }
+
+    /// Pull 48 kHz mono samples for the speaker.
+    pub fn audio(&mut self, out: &mut [i16]) {
+        self.sound.fill(&mut self.core, out);
+    }
+
+    /// Attach persistent storage; call before `boot`.
+    pub fn set_storage(&mut self, s: Box<dyn Storage>) {
+        self.storage = Some(s);
+    }
+
+    /// Write the user's data now if it changed since the last save.
+    pub fn save(&mut self) -> bool {
+        let snap = self.core.snapshot();
+        if snap == self.saved {
+            return true;
+        }
+        let ok = self.storage.as_mut().is_some_and(|s| s.save(&snap));
+        if ok {
+            self.saved = snap;
+        }
+        ok
     }
 
     pub fn boot(&mut self) {
+        if let Some(data) = self.storage.as_mut().and_then(|s| s.load()) {
+            self.restored = self.core.restore(&data);
+            if self.restored {
+                self.saved = data;
+            }
+        }
         self.core.boot();
         self.stack.clear();
         self.stack.push(Box::new(screens::Home));
@@ -152,6 +192,9 @@ impl Phone {
             }
             return;
         }
+        if let Key::Num(d) = k {
+            self.sound.cue(crate::audio::Cue::Key(d));
+        }
         self.with_top(|s, c| s.key(c, k));
         self.drain_events();
     }
@@ -160,6 +203,13 @@ impl Phone {
         self.core.step(now);
         self.drain_events();
         self.with_top(|s, c| s.tick(c));
+        if self.core.alarm_ringing && !self.stack.iter().any(|s| s.is_alarm()) {
+            self.core.alarm_ringing = false;
+        }
+        if self.storage.is_some() && now.saturating_sub(self.last_save) >= 2000 {
+            self.last_save = now;
+            self.save();
+        }
         if self.toast.as_ref().is_some_and(|(_, t)| now > *t) {
             self.toast = None;
         }
@@ -179,11 +229,15 @@ impl Phone {
                         self.stack.push(Box::new(screens::Home));
                     }
                     let who = self.core.name_for(&number);
+                    self.sound.cue(if reason == "Busy" { crate::audio::Cue::Busy } else { crate::audio::Cue::CallEnd });
                     let msg = if secs > 0 { format!("{} {}", reason, util::duration(secs)) } else { format!("{}: {}", reason, who) };
                     self.toast(&msg);
                 }
                 Event::NewMessage { number, transport } => {
                     let viewing = self.stack.last().and_then(|s| s.thread()).is_some_and(|t| util::same_number(t, &number));
+                    if !self.stack.last().is_some_and(|s| s.is_call()) {
+                        self.sound.cue(crate::audio::Cue::Message);
+                    }
                     if !viewing && !self.stack.last().is_some_and(|s| s.is_call()) {
                         let kind = if transport == Transport::Mms { "MMS" } else { "Message" };
                         let who = self.core.name_for(&number);
@@ -192,7 +246,10 @@ impl Phone {
                 }
                 Event::Ussd(t) => self.stack.push(Box::new(screens::MsgBox::new("Network", &t))),
                 Event::Alert { title, text } => self.stack.push(Box::new(screens::MsgBox::alert(&title, &text))),
-                Event::Alarm => self.stack.push(Box::new(screens::AlarmRing)),
+                Event::Alarm => {
+                    self.core.alarm_ringing = true;
+                    self.stack.push(Box::new(screens::AlarmRing));
+                }
                 Event::Toast(t) => self.toast(&t),
             }
         }

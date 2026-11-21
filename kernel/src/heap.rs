@@ -1,12 +1,11 @@
-//! Kernel heap: power-of-two size-class allocator over the RAM after the
-//! kernel image. Freed blocks go to per-class free lists; fresh blocks are
-//! carved from a bump pointer.
+//! Kernel heap: power-of-two size-class allocator over a RAM region picked
+//! at boot from the device tree. Freed blocks go to per-class free lists;
+//! fresh blocks are carved from a bump pointer.
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-const CLASSES: usize = 28; // 16 B .. 2 GiB
-pub const RAM_END: usize = 0x4000_0000 + 128 * 1024 * 1024;
+const CLASSES: usize = 28;
 
 struct Inner {
     next: usize,
@@ -26,15 +25,14 @@ pub static IN_USE: AtomicUsize = AtomicUsize::new(0);
 #[global_allocator]
 pub static HEAP: Heap = Heap { lock: AtomicBool::new(false), inner: UnsafeCell::new(Inner { next: 0, end: 0, free: [0; CLASSES] }) };
 
-extern "C" {
-    static __heap_start: u8;
-}
-
-pub fn init() -> (usize, usize) {
-    let start = core::ptr::addr_of!(__heap_start) as usize;
+pub fn init(start: usize, end: usize) {
     let h = unsafe { &mut *HEAP.inner.get() };
     h.next = (start + 4095) & !4095;
-    h.end = RAM_END;
+    h.end = end;
+}
+
+pub fn range() -> (usize, usize) {
+    let h = unsafe { &*HEAP.inner.get() };
     (h.next, h.end)
 }
 

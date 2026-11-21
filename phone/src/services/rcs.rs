@@ -3,7 +3,9 @@
 //! SIP MESSAGE with CPIM, IMDN delivery/display receipts, isComposing,
 //! and transparent fallback to SMS.
 use super::*;
+use super::ft::CT_FT;
 use crate::cpim::{self, CpimOut, Disposition};
+use crate::mime;
 use crate::msg::TextMsg;
 use crate::sip::{self, Challenge, IARI_FT_HTTP, ICSI_CPM_MSG};
 
@@ -67,6 +69,7 @@ pub struct Rcs {
 
 const CAP_TTL: u64 = 10 * 60 * 1000;
 const LOCAL_IP: &str = "10.64.0.4";
+pub const CONF_FACTORY: &str = "conf-factory";
 
 impl Core {
     fn me(&self) -> String {
@@ -235,6 +238,18 @@ impl Core {
         self.sip_send(&m);
     }
 
+    fn cpim_body(&self, msg_id: &str, disposition: Option<&str>, ctype: &str, body: &str) -> String {
+        cpim::encode(&CpimOut {
+            from: "sip:anonymous@anonymous.invalid",
+            to: "sip:anonymous@anonymous.invalid",
+            msg_id,
+            datetime: &util::iso8601(self.unix()),
+            disposition,
+            content_type: ctype,
+            body,
+        })
+    }
+
     fn cpim_message(&mut self, to: &str, kind: TxKind, msg_id: &str, disposition: Option<&str>, ctype: &str, body: &str) {
         let cp = cpim::encode(&CpimOut {
             from: "sip:anonymous@anonymous.invalid",
@@ -250,18 +265,90 @@ impl Core {
     }
 
     fn send_cpm(&mut self, id: u32, to: &str) {
-        let imdn = self.rng.token(16);
-        let text = match self.find_msg(id) {
+        let (text, files) = match self.find_msg(id) {
             Some(m) => {
-                m.imdn_id = imdn.clone();
                 m.transport = Transport::Rcs;
-                m.text.clone()
+                (m.text.clone(), !m.attachments.is_empty())
             }
             None => return,
         };
-        let disp = if self.settings.delivery_reports { "positive-delivery, display" } else { "display" };
         self.rcs.composing_sent.remove(to);
-        self.cpim_message(to, TxKind::Message(id), &imdn, Some(disp), cpim::CT_TEXT, &text);
+        if !text.is_empty() {
+            self.rcs_payload(id, to, cpim::CT_TEXT, &text);
+        }
+        if files {
+            self.ft_upload(id, 0);
+        }
+    }
+
+    /// IMDN id for a payload of message `id` (the first payload owns the receipts).
+    fn payload_imdn(&mut self, id: u32) -> String {
+        let fresh = self.rng.token(16);
+        match self.find_msg(id) {
+            Some(m) if m.imdn_id.is_empty() => {
+                m.imdn_id = fresh.clone();
+                fresh
+            }
+            _ => fresh,
+        }
+    }
+
+    fn disposition(&self) -> &'static str {
+        if self.settings.delivery_reports {
+            "positive-delivery, display"
+        } else {
+            "display"
+        }
+    }
+
+    /// One CPIM payload (text or file-info) to a single peer.
+    pub(crate) fn rcs_payload(&mut self, id: u32, to: &str, ctype: &str, body: &str) {
+        let imdn = self.payload_imdn(id);
+        let disp = self.disposition();
+        self.cpim_message(to, TxKind::Message(id), &imdn, Some(disp), ctype, body);
+    }
+
+    pub(crate) fn rcs_send_group(&mut self, id: u32, key: &str) {
+        let (text, files) = match self.find_msg(id) {
+            Some(m) => (m.text.clone(), !m.attachments.is_empty()),
+            None => return,
+        };
+        if !text.is_empty() {
+            self.rcs_group_payload(id, key, cpim::CT_TEXT, &text);
+        }
+        if files {
+            self.ft_upload(id, 0);
+        }
+    }
+
+    /// Pager-mode group message: a multi-recipient MESSAGE (RFC 5365) to the
+    /// conference factory, carrying the recipient list and the CPIM payload.
+    pub(crate) fn rcs_group_payload(&mut self, id: u32, key: &str, ctype: &str, body: &str) {
+        let (members, name, conv) = match self.thread(key) {
+            Some(t) => (t.members.clone(), t.group_name.clone(), t.group_id().to_string()),
+            None => return,
+        };
+        let imdn = self.payload_imdn(id);
+        let disp = self.disposition();
+        let cp = self.cpim_body(&imdn, Some(disp), ctype, body);
+        let uris: Vec<String> = members.iter().map(|m| format!("sip:{}@{}", m, IMS_HOST)).collect();
+        let boundary = format!("tqgrp{}", self.rng.token(10));
+        let (ct, mbody) = mime::encode(
+            "mixed",
+            &boundary,
+            &[
+                mime::Part::new(mime::CT_RESOURCE_LISTS, mime::resource_list(&uris).as_bytes()).h("Content-Disposition", "recipient-list"),
+                mime::Part::new(cpim::CT_CPIM, cp.as_bytes()),
+            ],
+        );
+        let contribution = self.rng.token(16);
+        let mut m = self.new_dialogless("MESSAGE", CONF_FACTORY, TxKind::Message(id));
+        m.add("Require", "recipient-list-message");
+        m.add("Conversation-ID", &conv);
+        m.add("Contribution-ID", &contribution);
+        m.add("Subject", &name);
+        let m = m.body(&ct, &mbody);
+        self.sip_send(&m);
     }
 
     pub(crate) fn rcs_send_imdn(&mut self, to: &str, msg_id: &str, d: Disposition) {
@@ -275,6 +362,9 @@ impl Core {
 
     /// Typing notification; throttled, and only towards RCS-capable peers.
     pub fn rcs_composing(&mut self, to: &str, active: bool) {
+        if to.starts_with(GROUP_PREFIX) {
+            return; // pager-mode groups don't carry isComposing
+        }
         if !self.rcs_usable() || !self.settings.typing_indicators || self.peer_rcs(to) != Some(true) {
             return;
         }
@@ -294,12 +384,26 @@ impl Core {
         self.cpim_message(to, TxKind::Other, &own, None, cpim::CT_COMPOSING, &cpim::iscomposing_xml(active));
     }
 
-    fn rcs_fallback(&mut self, id: u32) {
-        let (to, text) = match self.threads.iter().find(|t| t.msgs.iter().any(|m| m.id == id)) {
-            Some(t) => (t.number.clone(), t.msgs.iter().find(|m| m.id == id).map(|m| m.text.clone()).unwrap_or_default()),
+    /// Chat unavailable: SMS for 1:1 text, MMS for pictures and groups.
+    pub(crate) fn rcs_fallback(&mut self, id: u32) {
+        let (to, members, group, m) = match self.threads.iter().find(|t| t.msgs.iter().any(|m| m.id == id)) {
+            Some(t) => (t.number.clone(), t.members.clone(), t.is_group(), t.msgs.iter().find(|m| m.id == id).cloned()),
             None => return,
         };
-        self.send_sms(id, &to, &text);
+        let m = match m {
+            Some(m) => m,
+            None => return,
+        };
+        if m.status >= Status::Sent && m.transport != Transport::Rcs {
+            return;
+        }
+        if group {
+            self.mms_send(id, &members, &m.text, m.attachments);
+        } else if !m.attachments.is_empty() {
+            self.mms_send(id, &[to], &m.text, m.attachments);
+        } else {
+            self.send_sms(id, &to, &m.text);
+        }
     }
 
     fn flush_outbox(&mut self, number: &str) {
@@ -418,22 +522,47 @@ impl Core {
                 let r = sip::response_to(&m, 200, "OK", Some(&self.rng.token(8)));
                 self.sip_send(&r);
                 let from = sip::uri_user(m.header("P-Asserted-Identity").or_else(|| m.header("From")).unwrap_or(""));
-                let body = m.body_str();
-                let c = match cpim::decode(&body) {
+                let ctype = m.header("Content-Type").unwrap_or("").to_string();
+                let mut key = from.clone();
+                let mut cpim_body = m.body_str();
+                if ctype.to_ascii_lowercase().starts_with("multipart/") {
+                    // Group message: recipient list + CPIM payload.
+                    let parts = mime::decode(&ctype, &m.body);
+                    let mut members: Vec<String> = Vec::new();
+                    cpim_body.clear();
+                    for p in &parts {
+                        let pct = p.content_type().to_ascii_lowercase();
+                        if pct.starts_with(mime::CT_RESOURCE_LISTS) {
+                            members = mime::parse_resource_list(&String::from_utf8_lossy(&p.body)).iter().map(|u| sip::uri_user(u)).collect();
+                        } else if pct.starts_with(cpim::CT_CPIM) {
+                            cpim_body = String::from_utf8_lossy(&p.body).into_owned();
+                        }
+                    }
+                    if let Some(conv) = m.header("Conversation-ID").map(|c| c.to_string()) {
+                        members.push(from.clone());
+                        let name = m.header("Subject").unwrap_or("").to_string();
+                        key = self.create_group(&name, &members, Some(&conv));
+                    }
+                }
+                let c = match cpim::decode(&cpim_body) {
                     Some(c) => c,
                     None => return,
                 };
                 let ct = c.content_type.to_ascii_lowercase();
-                if c.is_text() {
-                    let mut msg = self.new_msg(true, Transport::Rcs, &c.body);
-                    msg.imdn_id = c.message_id().unwrap_or("").to_string();
-                    msg.wants_display = c.wants("display");
-                    let wants_delivery = c.wants("positive-delivery");
-                    let id = msg.imdn_id.clone();
-                    self.rcs.caps.insert(from.clone(), (true, self.now));
-                    self.push_incoming(&from, msg);
-                    if wants_delivery && !id.is_empty() {
-                        self.rcs_send_imdn(&from, &id, Disposition::Delivered);
+                self.rcs.caps.insert(from.clone(), (true, self.now));
+                let imdn = c.message_id().unwrap_or("").to_string();
+                if c.is_text() || ct.starts_with(CT_FT) {
+                    if c.is_text() {
+                        let mut msg = self.new_msg(true, Transport::Rcs, &c.body);
+                        msg.imdn_id = imdn.clone();
+                        msg.wants_display = c.wants("display");
+                        msg.from = from.clone();
+                        self.push_incoming(&key, msg);
+                    } else {
+                        self.ft_incoming(&key, &from, &imdn, c.wants("display"), &c.body);
+                    }
+                    if c.wants("positive-delivery") && !imdn.is_empty() {
+                        self.rcs_send_imdn(&from, &imdn, Disposition::Delivered);
                     }
                 } else if ct.starts_with(cpim::CT_IMDN) {
                     if let Some((id, d)) = cpim::parse_imdn(&c.body) {
@@ -446,8 +575,9 @@ impl Core {
                     }
                 } else if ct.starts_with(cpim::CT_COMPOSING) {
                     if let Some(active) = cpim::parse_iscomposing(&c.body) {
-                        let t = self.thread_idx(&from);
+                        let t = self.thread_idx(&key);
                         self.threads[t].typing_until = if active { self.now + 15_000 } else { 0 };
+                        self.threads[t].typing_who = from.clone();
                     }
                 }
             }

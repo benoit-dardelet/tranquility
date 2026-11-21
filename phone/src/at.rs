@@ -10,6 +10,10 @@ pub trait Link {
     fn read(&mut self, out: &mut Vec<u8>);
     /// Give the link a chance to make progress (used by the simulator).
     fn poll(&mut self, _now_ms: u64) {}
+    /// 8 kHz call downlink audio, if the baseband routes it to the host.
+    fn voice(&mut self, _out: &mut [i16]) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +157,10 @@ impl Modem {
                 self.unsolicited(l);
             }
         }
+    }
+
+    pub fn voice(&mut self, out: &mut [i16]) -> bool {
+        self.link.voice(out)
     }
 
     pub fn take_urc(&mut self) -> Option<Urc> {

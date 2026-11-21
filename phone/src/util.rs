@@ -279,6 +279,9 @@ pub fn normalize_number(n: &str) -> String {
 
 /// Loose phone-number equality (compares the last 10 digits).
 pub fn same_number(a: &str, b: &str) -> bool {
+    if a.starts_with("group:") || b.starts_with("group:") {
+        return a == b;
+    }
     let da: Vec<char> = a.chars().filter(|c| c.is_ascii_digit()).collect();
     let db: Vec<char> = b.chars().filter(|c| c.is_ascii_digit()).collect();
     if da.is_empty() || db.is_empty() {

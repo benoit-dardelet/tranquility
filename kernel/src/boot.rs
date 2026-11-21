@@ -1,5 +1,14 @@
-//! Reset entry, EL2→EL1 drop, FP enable, BSS clear, identity-mapped MMU
-//! and the exception vector table.
+//! Entry point.
+//!
+//! The kernel is an arm64 Linux-style `Image`: a 64-byte header lets
+//! QEMU and Android bootloaders (ABL, U-Boot…) load it like Linux, place
+//! it anywhere, and pass a device tree in x0. The image is linked at 0 as
+//! a position-independent executable and applies its own
+//! R_AARCH64_RELATIVE relocations before touching any absolute address.
+//!
+//! Boot: park secondary cores → drop EL2→EL1 if needed → relocate →
+//! stack, FP, BSS → identity-map all 512 GiB as device memory (XN) with the
+//! kernel's own GiB as normal cacheable memory → MMU on → `kmain(dtb)`.
 use core::arch::global_asm;
 
 global_asm!(
@@ -7,9 +16,21 @@ global_asm!(
 .section .text.boot, "ax"
 .global _start
 _start:
-    // park secondary cores
+    b       __real_start            // code0
+    .long   0                       // code1
+    .quad   0x80000                 // text_offset (traditional; we run anywhere)
+    .quad   __image_size            // effective image size incl. BSS + stack
+    .quad   0xA                     // flags: LE, 4K pages, place anywhere
+    .quad   0
+    .quad   0
+    .quad   0
+    .ascii  "ARM\x64"               // magic
+    .long   0
+
+__real_start:
+    mov     x21, x0                 // device tree blob
     mrs     x0, mpidr_el1
-    and     x0, x0, #3
+    and     x0, x0, #0xFF
     cbz     x0, 2f
 1:  wfe
     b       1b
@@ -18,7 +39,7 @@ _start:
     lsr     x0, x0, #2
     cmp     x0, #2
     b.ne    3f
-    // running at EL2: configure EL1 as AArch64 and drop to it
+    // EL2 -> EL1 (AArch64), give EL1 the timers
     mov     x0, #(1 << 31)
     msr     hcr_el2, x0
     mov     x0, #3
@@ -30,31 +51,67 @@ _start:
     msr     elr_el2, x0
     eret
 3:
-    ldr     x0, =__stack_top
-    mov     sp, x0
-    // FP/SIMD on (CPACR_EL1.FPEN = 0b11)
-    mov     x0, #(3 << 20)
-    msr     cpacr_el1, x0
-    isb
-    // clear .bss
-    ldr     x0, =__bss_start
-    ldr     x1, =__bss_end
-4:  cmp     x0, x1
+    // ---- self-relocation (image linked at 0)
+    adr     x22, _start
+    adrp    x1, __rela_start
+    add     x1, x1, :lo12:__rela_start
+    adrp    x2, __rela_end
+    add     x2, x2, :lo12:__rela_end
+4:  cmp     x1, x2
     b.hs    5f
-    str     xzr, [x0], #8
+    ldp     x3, x4, [x1]            // r_offset, r_info
+    ldr     x5, [x1, #16]           // r_addend
+    add     x1, x1, #24
+    and     x4, x4, #0xFFFFFFFF
+    cmp     x4, #1027               // R_AARCH64_RELATIVE
+    b.ne    4b
+    add     x5, x5, x22
+    str     x5, [x22, x3]
     b       4b
 5:
-    ldr     x0, =__vectors
+    adrp    x0, __stack_top
+    add     x0, x0, :lo12:__stack_top
+    mov     sp, x0
+    mov     x0, #(3 << 20)          // FP/SIMD on
+    msr     cpacr_el1, x0
+    isb
+    adrp    x0, __bss_start
+    add     x0, x0, :lo12:__bss_start
+    adrp    x1, __bss_end
+    add     x1, x1, :lo12:__bss_end
+6:  cmp     x0, x1
+    b.hs    7f
+    str     xzr, [x0], #8
+    b       6b
+7:
+    adrp    x0, __vectors
+    add     x0, x0, :lo12:__vectors
     msr     vbar_el1, x0
 
-    // ---- MMU: identity map with 1 GiB L1 blocks (4K granule, 39-bit VA)
-    //  [0, 1G)  device nGnRnE  (flash, GIC, UART, virtio …)
-    //  [1G, 2G) normal write-back, inner shareable (RAM)
-    ldr     x0, =__l1_table
-    ldr     x1, =0x0000000000000401
-    str     x1, [x0]
-    ldr     x1, =0x0000000040000705
-    str     x1, [x0, #8]
+    // ---- MMU: 512 x 1 GiB L1 blocks (4K granule, 39-bit VA), identity.
+    adrp    x0, __l1_table
+    add     x0, x0, :lo12:__l1_table
+    ldr     x2, =0x0060000000000401     // device nGnRnE, AF, PXN|UXN
+    mov     x1, #0
+8:  lsl     x3, x1, #30
+    orr     x3, x3, x2
+    str     x3, [x0, x1, lsl #3]
+    add     x1, x1, #1
+    cmp     x1, #512
+    b.lo    8b
+    // the GiB holding the kernel: normal write-back, inner shareable
+    lsr     x1, x22, #30
+    lsl     x3, x1, #30
+    mov     x2, #0x705
+    orr     x3, x3, x2
+    str     x3, [x0, x1, lsl #3]
+    // the GiB holding the DTB too (it's in RAM)
+    lsr     x1, x21, #30
+    lsl     x3, x1, #30
+    orr     x3, x3, x2
+    cbz     x21, 9f
+    str     x3, [x0, x1, lsl #3]
+9:
     ldr     x1, =0xFF00                 // MAIR: attr0 device, attr1 normal WB
     msr     mair_el1, x1
     ldr     x1, =0x200803519            // T0SZ=25 WBWA IS 4K EPD1 IPS=40bit
@@ -65,16 +122,19 @@ _start:
     dsb     ish
     isb
     mrs     x1, sctlr_el1
-    orr     x1, x1, #(1 << 0)           // M
-    orr     x1, x1, #(1 << 2)           // C
-    orr     x1, x1, #(1 << 12)          // I
-    bic     x1, x1, #(1 << 1)           // no alignment faults
+    orr     x1, x1, #(1 << 0)
+    orr     x1, x1, #(1 << 2)
+    orr     x1, x1, #(1 << 12)
+    bic     x1, x1, #(1 << 1)
+    bic     x1, x1, #(1 << 19)          // no WXN
     msr     sctlr_el1, x1
     isb
 
+    mov     x0, x21
+    mov     x1, x22
     bl      kmain
-6:  wfe
-    b       6b
+10: wfe
+    b       10b
 
 .section .bss.pagetable, "aw", @nobits
 .balign 4096
@@ -92,19 +152,19 @@ __l1_table:
 .balign 0x800
 .global __vectors
 __vectors:
-    VENT    __exc_sync      // current EL, SP0
+    VENT    __exc_sync
     VENT    __exc_irq
     VENT    __exc_other
     VENT    __exc_other
-    VENT    __exc_sync      // current EL, SPx
+    VENT    __exc_sync
     VENT    __exc_irq
     VENT    __exc_other
     VENT    __exc_other
-    VENT    __exc_other     // lower EL, AArch64
     VENT    __exc_other
     VENT    __exc_other
     VENT    __exc_other
-    VENT    __exc_other     // lower EL, AArch32
+    VENT    __exc_other
+    VENT    __exc_other
     VENT    __exc_other
     VENT    __exc_other
     VENT    __exc_other

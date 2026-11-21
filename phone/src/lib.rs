@@ -21,17 +21,20 @@ pub(crate) mod prelude {
 }
 
 pub mod at;
+pub mod audio;
 pub mod bmp;
 pub mod cb;
 pub mod cpim;
 pub mod gsm7;
 pub mod md5;
+pub mod mime;
 pub mod mms;
 pub mod msg;
 pub mod services;
 pub mod sim;
 pub mod sip;
 pub mod sms;
+pub mod store;
 pub mod ui;
 pub mod util;
 pub mod wsp;

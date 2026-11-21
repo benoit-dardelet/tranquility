@@ -454,7 +454,11 @@ impl Screen for CallScreen {
         match k {
             Key::Ok | Key::Call if incoming => c.answer(),
             Key::Back if incoming => c.hangup(),
-            Key::Opt if incoming => c.settings.ringer = false,
+            Key::Opt if incoming => {
+                if let Some(x) = &mut c.call {
+                    x.silenced = true;
+                }
+            }
             Key::Back => c.hangup(),
             Key::Opt => c.toggle_mute(),
             Key::Ok => {
@@ -577,11 +581,12 @@ impl Screen for NewMessage {
 pub struct ThreadView {
     number: String,
     scroll: usize,
+    caps_checked: bool,
 }
 
 impl ThreadView {
     pub fn new(number: &str) -> ThreadView {
-        ThreadView { number: number.to_string(), scroll: 0 }
+        ThreadView { number: number.to_string(), scroll: 0, caps_checked: false }
     }
 }
 
@@ -710,6 +715,13 @@ impl Screen for ThreadView {
         }
     }
     fn tick(&mut self, c: &mut Core) -> Nav {
+        if !self.caps_checked && c.rcs_usable() {
+            self.caps_checked = true;
+            if !self.number.starts_with(crate::services::GROUP_PREFIX) && c.peer_rcs(&self.number).is_none() {
+                let n = self.number.clone();
+                c.rcs_query_caps(&n);
+            }
+        }
         let unread = c.threads.iter().any(|t| same_number(&t.number, &self.number) && t.unread() > 0);
         if unread {
             let n = self.number.clone();
@@ -1163,6 +1175,9 @@ impl Screen for AlarmSet {
 pub struct AlarmRing;
 
 impl Screen for AlarmRing {
+    fn is_alarm(&self) -> bool {
+        true
+    }
     fn render(&self, c: &Core, f: &mut Frame) {
         f.title = "Alarm".into();
         f.line("");
@@ -1176,11 +1191,15 @@ impl Screen for AlarmRing {
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
             Key::Opt => {
+                c.alarm_ringing = false;
                 c.alarm_snooze = Some(c.local() + 300);
                 c.toast("Snoozed for 5 minutes");
                 Nav::Pop
             }
-            Key::Ok | Key::Back => Nav::Pop,
+            Key::Ok | Key::Back => {
+                c.alarm_ringing = false;
+                Nav::Pop
+            }
             _ => Nav::Stay,
         }
     }
@@ -1372,6 +1391,7 @@ impl SettingsScreen {
             format!("Delivery reports: {}", on_off(s.delivery_reports)),
             format!("Read receipts: {}", on_off(s.read_receipts)),
             format!("Typing indicator: {}", on_off(s.typing_indicators)),
+            format!("Ringtone: {}", on_off(s.ringer)),
             "Phone status".to_string(),
             "AT command log".to_string(),
             "About".to_string(),
@@ -1386,7 +1406,7 @@ impl Screen for SettingsScreen {
         f.soft("", "Change", "Back");
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
-        if nav_list(k, &mut self.sel, 10) {
+        if nav_list(k, &mut self.sel, 11) {
             return Nav::Stay;
         }
         if k == Key::Back {
@@ -1409,8 +1429,9 @@ impl Screen for SettingsScreen {
             4 => s.delivery_reports = !s.delivery_reports,
             5 => s.read_receipts = !s.read_receipts,
             6 => s.typing_indicators = !s.typing_indicators,
-            7 => return push(MsgBox::lines("Phone status", status_lines(c))),
-            8 => {
+            7 => s.ringer = !s.ringer,
+            8 => return push(MsgBox::lines("Phone status", status_lines(c))),
+            9 => {
                 let lines: Vec<String> = c.modem.trace.iter().rev().take(40).flat_map(|l| wrap(l, W)).collect();
                 return push(MsgBox::lines("AT log (newest)", lines));
             }

@@ -14,6 +14,7 @@ use crate::sms::{self, Tpdu};
 use crate::util::{self, hex, split_args, starts_with_ic, unhex, Rng};
 
 pub mod bots;
+pub mod ftcs;
 pub mod ims;
 pub mod mmsc;
 
@@ -94,6 +95,7 @@ struct Call {
 enum Server {
     Ims,
     Mmsc,
+    Ftcs,
 }
 
 pub struct SimModem {
@@ -118,9 +120,11 @@ pub struct SimModem {
     sockets: BTreeMap<u8, Server>,
     ims: ims::Ims,
     mmsc: mmsc::Mmsc,
+    ftcs: ftcs::Ftcs,
     concat: BTreeMap<(String, u16), Vec<Option<String>>>,
     sms_ref: u8,
     signal_lost_until: u64,
+    talker: Option<(String, crate::audio::Talker)>,
 }
 
 impl Default for SimModem {
@@ -153,9 +157,11 @@ impl SimModem {
             sockets: BTreeMap::new(),
             ims: ims::Ims::default(),
             mmsc: mmsc::Mmsc::default(),
+            ftcs: ftcs::Ftcs::default(),
             concat: BTreeMap::new(),
             sms_ref: 0,
             signal_lost_until: 0,
+            talker: None,
         }
     }
 
@@ -223,6 +229,7 @@ impl SimModem {
         match self.sockets.remove(&c) {
             Some(Server::Ims) => self.ims.on_close(c),
             Some(Server::Mmsc) => self.mmsc.on_close(c),
+            Some(Server::Ftcs) => self.ftcs.on_close(c),
             None => {}
         }
     }
@@ -537,6 +544,7 @@ impl SimModem {
                 let server = match host.as_str() {
                     IMS_DOMAIN => Some(Server::Ims),
                     MMSC_HOST => Some(Server::Mmsc),
+                    ftcs::HOST => Some(Server::Ftcs),
                     _ => None,
                 };
                 match server {
@@ -561,6 +569,10 @@ impl SimModem {
                     Some(Server::Mmsc) => {
                         self.emit("SEND OK");
                         self.mmsc.on_data(conn, &data, &mut self.s);
+                    }
+                    Some(Server::Ftcs) => {
+                        self.emit("SEND OK");
+                        self.ftcs.on_data(conn, &data, &mut self.s);
                     }
                     None => self.emit("SEND FAIL"),
                 }
@@ -604,6 +616,7 @@ impl SimModem {
                     self.reg = 2;
                 }
             }
+            8 => self.ims.inject_group(&mut self.s),
             7 => {
                 let text = "Carol here. This is a long message to show concatenated SMS: segments are sent with a user data header carrying a reference number, the total count and the sequence number, and the phone reassembles them in order before showing them. Neat, right?";
                 self.s.at(200, Ev::SmsFrom { from: "+15550103".into(), text: text.into() })
@@ -805,7 +818,7 @@ impl SimModem {
                 self.out.extend(hex(&pdu).as_bytes());
                 self.out.extend(b"\r\n");
             }
-            Ev::Ims(t) => self.ims.timed(t, &mut self.s),
+            Ev::Ims(t) => self.ims.timed(t, &mut self.s, &mut self.ftcs),
             Ev::Mms(t) => self.mmsc.timed(t, &mut self.s),
             Ev::CellBroadcast(id, text) => {
                 if self.registered() {
@@ -854,6 +867,27 @@ impl Link for SimModem {
 
     fn read(&mut self, out: &mut Vec<u8>) {
         out.extend(self.out.drain(..));
+    }
+
+    fn voice(&mut self, out: &mut [i16]) -> bool {
+        let who = match self.calls.iter().find(|c| c.stat == 0) {
+            Some(c) => c.number.clone(),
+            None => return false,
+        };
+        if self.talker.as_ref().map(|(n, _)| n != &who).unwrap_or(true) {
+            let f0 = match bots::find(&who).map(|b| b.name) {
+                Some("Alice") => 215.0,
+                Some("Carol") => 240.0,
+                Some("Bob") => 115.0,
+                _ => 140.0,
+            };
+            let seed = who.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            self.talker = Some((who, crate::audio::Talker::new(f0, seed)));
+        }
+        if let Some((_, t)) = &mut self.talker {
+            t.fill(out);
+        }
+        true
     }
 
     fn poll(&mut self, now_ms: u64) {

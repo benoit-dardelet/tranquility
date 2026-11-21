@@ -7,12 +7,16 @@ use crate::prelude::*;
 use crate::sms::{self, Tpdu};
 use crate::util::{self, hex, same_number, split_args, unhex, Rng};
 
+pub mod ft;
+pub mod http;
 pub mod mms;
 pub mod rcs;
 
 pub const IMS_HOST: &str = "ims.tranquil.net";
 pub const MMSC_HOST: &str = "mmsc.tranquil.net";
 pub const MMSC_PATH: &str = "/mms";
+pub const FTCS_HOST: &str = "ftcs.tranquil.net";
+pub const GROUP_PREFIX: &str = "group:";
 pub const CID_INTERNET: u8 = 1;
 pub const CID_IMS: u8 = 2;
 pub const CID_MMS: u8 = 3;
@@ -61,16 +65,29 @@ pub struct Message {
     pub wants_display: bool,
     /// SMS message references awaiting status reports
     pub sms_mrs: Vec<u8>,
+    /// sender of an incoming message (matters in group threads)
+    pub from: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct Thread {
+    /// peer number, or `group:<conversation-id>` for group threads
     pub number: String,
     pub msgs: Vec<Message>,
     pub typing_until: u64,
+    /// other participants of a group thread
+    pub members: Vec<String>,
+    pub group_name: String,
+    pub typing_who: String,
 }
 
 impl Thread {
+    pub fn is_group(&self) -> bool {
+        self.number.starts_with(GROUP_PREFIX)
+    }
+    pub fn group_id(&self) -> &str {
+        self.number.strip_prefix(GROUP_PREFIX).unwrap_or("")
+    }
     pub fn unread(&self) -> usize {
         self.msgs.iter().filter(|m| m.unread).count()
     }
@@ -96,6 +113,7 @@ pub struct Call {
     pub connected_at: Option<u64>,
     pub muted: bool,
     pub speaker: bool,
+    pub silenced: bool,
     pub emergency: bool,
 }
 
@@ -239,7 +257,7 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
     Rcs,
-    Mms(u32),
+    Http(u32),
 }
 
 #[derive(Debug)]
@@ -269,6 +287,7 @@ pub struct Core {
     pub events: VecDeque<Event>,
     pub rcs: rcs::Rcs,
     pub mms: mms::MmsAgent,
+    pub http: http::HttpAgent,
     socks: BTreeMap<u8, Sock>,
     reasm: sms::Reassembler,
     next_msg: u32,
@@ -278,6 +297,7 @@ pub struct Core {
     last_clcc: u64,
     last_minute: i64,
     pub alarm_snooze: Option<i64>,
+    pub alarm_ringing: bool,
 }
 
 impl Core {
@@ -301,6 +321,7 @@ impl Core {
             events: VecDeque::new(),
             rcs: rcs::Rcs::default(),
             mms: mms::MmsAgent::default(),
+            http: http::HttpAgent::default(),
             socks: BTreeMap::new(),
             reasm: sms::Reassembler::default(),
             next_msg: 1,
@@ -310,6 +331,7 @@ impl Core {
             last_clcc: 0,
             last_minute: 0,
             alarm_snooze: None,
+            alarm_ringing: false,
         };
         for (n, num) in [("Alice", "+15550101"), ("Bob", "+15550102"), ("Carol", "+15550103"), ("Dave", "+15550104"), ("Voicemail", "+15550199")] {
             c.contacts.push(Contact { name: n.into(), number: num.into() });
@@ -328,7 +350,19 @@ impl Core {
     }
 
     pub fn name_for(&self, number: &str) -> String {
+        if number.starts_with(GROUP_PREFIX) {
+            return self.threads.iter().find(|t| t.number == number).map(|t| t.group_name.clone()).unwrap_or_else(|| "Group".into());
+        }
         self.contacts.iter().find(|c| same_number(&c.number, number)).map(|c| c.name.clone()).unwrap_or_else(|| number.to_string())
+    }
+
+    pub(crate) fn next_msg_id(&self) -> u32 {
+        self.next_msg
+    }
+
+    pub(crate) fn set_next_msg_id(&mut self, n: u32) {
+        let max = self.threads.iter().flat_map(|t| t.msgs.iter()).map(|m| m.id).max().unwrap_or(0);
+        self.next_msg = n.max(max + 1);
     }
 
     pub fn toast(&mut self, s: &str) {
@@ -450,7 +484,7 @@ impl Core {
             self.net.rssi = 99;
             self.socks.clear();
             self.rcs_reset();
-            self.mms_reset();
+            self.http_reset();
         }
     }
 
@@ -485,7 +519,7 @@ impl Core {
             }
         }
         self.rcs_tick();
-        self.mms_tick();
+        self.http_tick();
         for t in &mut self.threads {
             if t.typing_until != 0 && t.typing_until < now {
                 t.typing_until = 0;
@@ -527,7 +561,7 @@ impl Core {
             }
             "RING" | "+CRING" => {
                 if self.call.is_none() {
-                    self.call = Some(Call { number: String::new(), state: CallState::Incoming, incoming: true, started: self.now, connected_at: None, muted: false, speaker: false, emergency: false });
+                    self.call = Some(Call { number: String::new(), state: CallState::Incoming, incoming: true, started: self.now, connected_at: None, muted: false, speaker: false, silenced: false, emergency: false });
                 }
             }
             "+CLIP" => {
@@ -612,7 +646,7 @@ impl Core {
             self.log.push(LogEntry { number, kind: LogKind::Dialed, time: self.unix(), secs: 0 });
             return Err(why);
         }
-        self.call = Some(Call { number, state: CallState::Dialing, incoming: false, started: self.now, connected_at: None, muted: false, speaker: false, emergency });
+        self.call = Some(Call { number, state: CallState::Dialing, incoming: false, started: self.now, connected_at: None, muted: false, speaker: false, silenced: false, emergency });
         self.last_clcc = self.now;
         Ok(())
     }
@@ -754,8 +788,30 @@ impl Core {
         if let Some(i) = self.threads.iter().position(|t| same_number(&t.number, number)) {
             return i;
         }
-        self.threads.push(Thread { number: number.to_string(), msgs: Vec::new(), typing_until: 0 });
+        self.threads.push(Thread { number: number.to_string(), msgs: Vec::new(), typing_until: 0, members: Vec::new(), group_name: String::new(), typing_who: String::new() });
         self.threads.len() - 1
+    }
+
+    /// Create (or reuse) a group thread; returns its key.
+    pub fn create_group(&mut self, name: &str, members: &[String], id: Option<&str>) -> String {
+        let mut members: Vec<String> = members.iter().map(|m| util::normalize_number(m)).filter(|m| !same_number(m, &self.info.number)).collect();
+        members.sort();
+        members.dedup();
+        if let Some(t) = self.threads.iter().find(|t| t.is_group() && (id.is_some_and(|i| t.group_id() == i) || (id.is_none() && t.members == members))) {
+            return t.number.clone();
+        }
+        let key = format!("{}{}", GROUP_PREFIX, id.map(|s| s.to_string()).unwrap_or_else(|| self.rng.token(16)));
+        let t = self.thread_idx(&key);
+        self.threads[t].members = members.clone();
+        self.threads[t].group_name = if name.is_empty() { format!("Group ({})", members.len() + 1) } else { name.to_string() };
+        for m in members {
+            self.rcs_query_caps(&m);
+        }
+        key
+    }
+
+    pub fn thread(&self, key: &str) -> Option<&Thread> {
+        self.threads.iter().find(|t| same_number(&t.number, key))
     }
 
     pub fn find_msg(&mut self, id: u32) -> Option<&mut Message> {
@@ -778,6 +834,7 @@ impl Core {
             imdn_id: String::new(),
             wants_display: false,
             sms_mrs: Vec::new(),
+            from: String::new(),
         }
     }
 
@@ -791,24 +848,39 @@ impl Core {
     }
 
     /// Send a message, choosing RCS → SMS (or MMS for attachments).
+    ///
+    /// * 1:1 text: RCS chat if available, SMS otherwise.
+    /// * 1:1 with attachments: RCS file transfer if available, MMS otherwise.
+    /// * group: RCS group chat if every member can chat, group MMS otherwise.
     pub fn send_message(&mut self, to: &str, text: &str, attachments: Vec<Part>, force_sms: bool) -> u32 {
-        let to = util::normalize_number(to);
-        let transport = if !attachments.is_empty() {
-            Transport::Mms
-        } else if !force_sms && self.rcs_usable() {
+        let to = if to.starts_with(GROUP_PREFIX) { to.to_string() } else { util::normalize_number(to) };
+        let t = self.thread_idx(&to);
+        let group = self.threads[t].is_group();
+        let members = self.threads[t].members.clone();
+        let rcs_ok = !force_sms && self.rcs_usable();
+        let transport = if group {
+            if rcs_ok && !members.is_empty() && members.iter().all(|m| self.peer_rcs(m) == Some(true)) {
+                Transport::Rcs
+            } else {
+                Transport::Mms
+            }
+        } else if rcs_ok && self.peer_rcs(&to) != Some(false) {
             Transport::Rcs
+        } else if !attachments.is_empty() {
+            Transport::Mms
         } else {
             Transport::Sms
         };
         let mut m = self.new_msg(false, transport, text);
         m.attachments = attachments.clone();
         let id = m.id;
-        let t = self.thread_idx(&to);
         self.threads[t].msgs.push(m);
-        match transport {
-            Transport::Sms => self.send_sms(id, &to, text),
-            Transport::Mms => self.mms_send(id, &to, text, attachments),
-            Transport::Rcs => self.rcs_send(id, &to, text),
+        match (transport, group) {
+            (Transport::Sms, _) => self.send_sms(id, &to, text),
+            (Transport::Mms, false) => self.mms_send(id, &[to.clone()], text, attachments),
+            (Transport::Mms, true) => self.mms_send(id, &members, text, attachments),
+            (Transport::Rcs, false) => self.rcs_send(id, &to, text),
+            (Transport::Rcs, true) => self.rcs_send_group(id, &to),
         }
         id
     }
@@ -884,13 +956,14 @@ impl Core {
             if m.unread {
                 m.unread = false;
                 if m.transport == Transport::Rcs && m.wants_display && !m.imdn_id.is_empty() {
-                    receipts.push(m.imdn_id.clone());
+                    let to = if m.from.is_empty() { number.to_string() } else { m.from.clone() };
+                    receipts.push((to, m.imdn_id.clone()));
                 }
             }
         }
         if self.settings.read_receipts {
-            for id in receipts {
-                self.rcs_send_imdn(number, &id, crate::cpim::Disposition::Displayed);
+            for (to, id) in receipts {
+                self.rcs_send_imdn(&to, &id, crate::cpim::Disposition::Displayed);
             }
         }
     }
@@ -965,14 +1038,14 @@ impl Core {
         }
         match owner {
             Owner::Rcs => self.rcs_connected(id),
-            Owner::Mms(tx) => self.mms_connected(tx, id),
+            Owner::Http(tx) => self.http_connected(tx, id),
         }
     }
 
     fn on_sock_data(&mut self, id: u8, d: &[u8]) {
         match self.socks.get(&id).map(|s| s.owner) {
             Some(Owner::Rcs) => self.rcs_data(id, d),
-            Some(Owner::Mms(tx)) => self.mms_data(tx, id, d),
+            Some(Owner::Http(tx)) => self.http_data(tx, id, d),
             None => {}
         }
     }
@@ -986,7 +1059,7 @@ impl Core {
     fn dispatch_closed(&mut self, owner: Owner, id: u8) {
         match owner {
             Owner::Rcs => self.rcs_closed(id),
-            Owner::Mms(tx) => self.mms_closed(tx),
+            Owner::Http(tx) => self.http_closed(tx),
         }
     }
 

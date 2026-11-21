@@ -10,7 +10,7 @@ use crate::util::same_number;
 
 #[derive(Clone, Debug)]
 pub enum Timed {
-    BotReply { from: String, text: String },
+    BotReply { from: String, text: String, to: Vec<String>, subject: Option<String> },
 }
 
 #[derive(Default)]
@@ -59,14 +59,25 @@ impl Mmsc {
                         let mut conf = Pdu::new(mms::M_SEND_CONF, &pdu.transaction_id);
                         conf.response_status = Some(mms::RESPONSE_OK);
                         conf.message_id = Some(id);
+                        let group = pdu.to.len() > 1;
+                        let mut replied = false;
                         for to in &pdu.to {
                             if same_number(to, OWN_NUMBER) {
                                 let mut copy = pdu.clone();
                                 copy.from = Some(OWN_NUMBER.into());
                                 self.deliver(copy, s);
                             } else if let Some(b) = bots::find(to) {
+                                if replied {
+                                    continue;
+                                }
                                 if let Some(text) = bots::reply(b, &pdu.text(), false) {
-                                    s.at(4000, Ev::Mms(Timed::BotReply { from: b.number.into(), text }));
+                                    // reply-all for group MMS
+                                    let mut rcpt: Vec<String> = pdu.to.iter().filter(|x| !same_number(x, b.number)).cloned().collect();
+                                    rcpt.push(OWN_NUMBER.into());
+                                    rcpt.dedup();
+                                    let subject = if group { pdu.subject.clone() } else { Some("Picture".into()) };
+                                    s.at(4000, Ev::Mms(Timed::BotReply { from: b.number.into(), text, to: rcpt, subject }));
+                                    replied = group;
                                 }
                             }
                         }
@@ -102,21 +113,21 @@ impl Mmsc {
 
     pub fn timed(&mut self, t: Timed, s: &mut Sched) {
         match t {
-            Timed::BotReply { from, text } => self.bot_mms(&from, &text, s),
+            Timed::BotReply { from, text, to, subject } => self.bot_mms(&from, &text, to, subject, s),
         }
     }
 
-    fn bot_mms(&mut self, from: &str, text: &str, s: &mut Sched) {
+    fn bot_mms(&mut self, from: &str, text: &str, to: Vec<String>, subject: Option<String>, s: &mut Sched) {
         let mut m = Pdu::new(mms::M_RETRIEVE_CONF, "");
         m.from = Some(from.to_string());
-        m.to.push(OWN_NUMBER.into());
-        m.subject = Some("Picture".into());
+        m.to = to;
+        m.subject = subject;
         m.parts.push(Part::text(text));
         m.parts.push(Part { content_type: "image/bmp".into(), name: "smiley.bmp".into(), data: bmp::encode(&bmp::SMILEY) });
         self.deliver(m, s);
     }
 
     pub fn inject_from_bot(&mut self, from: &str, s: &mut Sched) {
-        self.bot_mms(from, "Check out this picture!", s);
+        self.bot_mms(from, "Check out this picture!", vec![OWN_NUMBER.into()], Some("Picture".into()), s);
     }
 }

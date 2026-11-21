@@ -149,6 +149,7 @@ fn mms_send_and_receive() {
 #[test]
 fn mms_to_self_roundtrip() {
     let mut c = booted();
+    c.set_rcs(false);
     let vcard = crate::mms::Part { content_type: "text/x-vcard".into(), name: "alice.vcf".into(), data: b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice\r\nTEL:+15550101\r\nEND:VCARD\r\n".to_vec() };
     c.send_message("+15550100", "me to me", vec![vcard.clone()], false);
     run(&mut c, 6000);
@@ -235,4 +236,66 @@ fn network_mode_airplane_and_signal_loss() {
     assert!(!c.net.registered);
     run(&mut c, 9000);
     assert!(c.net.registered);
+}
+
+#[test]
+fn rcs_file_transfer_both_ways() {
+    let mut c = booted();
+    run(&mut c, 500);
+    // learn Alice's capabilities first so the picture goes by chat
+    c.rcs_query_caps("+15550101");
+    run(&mut c, 500);
+    let pic = crate::mms::Part { content_type: "image/bmp".into(), name: "smiley.bmp".into(), data: crate::bmp::encode(&crate::bmp::SMILEY) };
+    let id = c.send_message("+15550101", "", vec![pic], false);
+    run(&mut c, 8000);
+    let t = thread(&c, "+15550101");
+    let sent = t.msgs.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(sent.transport, Transport::Rcs, "{:?}", sent);
+    assert_eq!(sent.status, Status::Read);
+    let file = t.msgs.iter().find(|m| m.incoming && !m.attachments.is_empty()).expect("Alice sends a file back");
+    assert_eq!(file.transport, Transport::Rcs);
+    assert_eq!(file.attachments[0].name, "heart.bmp");
+    assert!(crate::bmp::render(&file.attachments[0].data).is_some());
+    assert!(t.msgs.iter().any(|m| m.incoming && m.text.contains("nice picture")));
+    assert_eq!(c.http_pending(), 0);
+}
+
+#[test]
+fn rcs_group_chat() {
+    let mut c = booted();
+    let key = c.create_group("Hike", &["+15550101".into(), "+15550103".into()], None);
+    run(&mut c, 1000);
+    let id = c.send_message(&key, "hello group", vec![], false);
+    run(&mut c, 8000);
+    let t = c.thread(&key).unwrap();
+    assert!(t.is_group());
+    assert_eq!(t.members, vec!["+15550101".to_string(), "+15550103".to_string()]);
+    let m = t.msgs.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(m.transport, Transport::Rcs);
+    assert!(m.status >= Status::Delivered, "{:?}", m.status);
+    let from: Vec<&str> = t.msgs.iter().filter(|m| m.incoming).map(|m| m.from.as_str()).collect();
+    assert!(from.contains(&"+15550101") && from.contains(&"+15550103"), "{:?}", t.msgs);
+    // group started by someone else
+    c.simulate(8);
+    run(&mut c, 6000);
+    let g = c.threads.iter().find(|t| t.group_name == "Weekend plans").expect("incoming group");
+    assert_eq!(g.msgs.len(), 3);
+    assert!(g.msgs[2].attachments.len() == 1, "file in group: {:?}", g.msgs[2]);
+}
+
+#[test]
+fn group_mms_when_someone_cannot_chat() {
+    let mut c = booted();
+    // Bob has no RCS: the group falls back to group MMS, and Bob replies to all.
+    let key = c.create_group("", &["+15550101".into(), "+15550102".into()], None);
+    run(&mut c, 1000);
+    let id = c.send_message(&key, "dinner tonight?", vec![], false);
+    run(&mut c, 10_000);
+    let t = c.thread(&key).unwrap();
+    let m = t.msgs.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(m.transport, Transport::Mms);
+    assert_eq!(m.status, Status::Sent);
+    let reply = t.msgs.iter().find(|m| m.incoming).expect("reply-all lands in the same group thread");
+    assert!(t.members.contains(&reply.from), "{:?}", reply.from);
+    assert_eq!(c.threads.iter().filter(|t| t.is_group()).count(), 1);
 }

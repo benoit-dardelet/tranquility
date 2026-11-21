@@ -4,7 +4,7 @@ use core::fmt;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-const BASE: usize = 0x0900_0000;
+static BASE: AtomicUsize = AtomicUsize::new(0);
 const DR: usize = 0x00;
 const FR: usize = 0x18;
 const IBRD: usize = 0x24;
@@ -15,13 +15,19 @@ const IMSC: usize = 0x38;
 const ICR: usize = 0x44;
 const FR_RXFE: u32 = 1 << 4;
 const FR_TXFF: u32 = 1 << 5;
-pub const IRQ: u32 = 33;
+pub static IRQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(33);
 
 fn reg(off: usize) -> *mut u32 {
-    (BASE + off) as *mut u32
+    (BASE.load(Ordering::Relaxed) + off) as *mut u32
 }
 
-pub fn init() {
+pub fn present() -> bool {
+    BASE.load(Ordering::Relaxed) != 0
+}
+
+pub fn init(base: usize, irq: u32) {
+    BASE.store(base, Ordering::Relaxed);
+    IRQ.store(irq, Ordering::Relaxed);
     unsafe {
         write_volatile(reg(CR), 0);
         write_volatile(reg(ICR), 0x7FF);
@@ -37,6 +43,9 @@ pub fn enable_rx_irq() {
 }
 
 pub fn putc(b: u8) {
+    if !present() {
+        return;
+    }
     unsafe {
         while read_volatile(reg(FR)) & FR_TXFF != 0 {
             core::hint::spin_loop();
@@ -60,6 +69,9 @@ static TAIL: AtomicUsize = AtomicUsize::new(0); // written by main loop
 
 /// Interrupt handler: drain the receive FIFO into the ring.
 pub fn on_irq() {
+    if !present() {
+        return;
+    }
     unsafe {
         while read_volatile(reg(FR)) & FR_RXFE == 0 {
             let b = read_volatile(reg(DR)) as u8;
