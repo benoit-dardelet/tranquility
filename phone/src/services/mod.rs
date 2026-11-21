@@ -298,6 +298,16 @@ pub struct Core {
     last_minute: i64,
     pub alarm_snooze: Option<i64>,
     pub alarm_ringing: bool,
+    /// where user data is kept (shown in Phone status)
+    pub storage: String,
+    /// set by the UI; the platform restarts / powers off after saving
+    pub power_request: Option<Power>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Power {
+    Restart,
+    Off,
 }
 
 impl Core {
@@ -332,6 +342,8 @@ impl Core {
             last_minute: 0,
             alarm_snooze: None,
             alarm_ringing: false,
+            storage: "not saved".into(),
+            power_request: None,
         };
         for (n, num) in [("Alice", "+15550101"), ("Bob", "+15550102"), ("Carol", "+15550103"), ("Dave", "+15550104"), ("Voicemail", "+15550199")] {
             c.contacts.push(Contact { name: n.into(), number: num.into() });

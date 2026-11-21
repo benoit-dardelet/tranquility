@@ -18,6 +18,9 @@ pub struct Platform {
     pub fwcfg: Option<usize>,
     /// MMIO windows that must stay device memory
     pub mmio: Vec<(u64, u64)>,
+    /// RAM that survives a warm restart (a "ramoops" reserved region)
+    pub persist: Option<(u64, u64)>,
+    pub psci: Option<crate::psci::Conduit>,
 }
 
 pub fn discover(f: &Fdt, dtb: usize) -> Platform {
@@ -91,6 +94,21 @@ pub fn discover(f: &Fdt, dtb: usize) -> Platform {
             p.virtio.push(a as usize);
             p.mmio.push((a, s.max(0x200)));
         }
+    }
+    if let Some(&n) = f.find_compatible(&["ramoops"]).first() {
+        if let Some(&(a, s)) = f.reg(n).first() {
+            if s >= 64 * 1024 {
+                p.persist = Some((a, s));
+                p.reserved.push((a, s));
+            }
+        }
+    }
+    if let Some(&n) = f.find_compatible(&["arm,psci-1.0", "arm,psci-0.2", "arm,psci"]).first() {
+        p.psci = match f.str(n, "method") {
+            Some("smc") => Some(crate::psci::Conduit::Smc),
+            Some("hvc") => Some(crate::psci::Conduit::Hvc),
+            _ => None,
+        };
     }
     if let Some(&n) = f.find_compatible(&["qemu,fw-cfg-mmio"]).first() {
         if let Some(&(a, s)) = f.reg(n).first() {

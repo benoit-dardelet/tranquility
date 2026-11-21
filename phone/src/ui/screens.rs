@@ -321,6 +321,7 @@ fn status_lines(c: &Core) -> Vec<String> {
         format!("Modem: {} {}", c.info.manufacturer, c.info.model),
         format!("FW: {}", c.info.firmware),
         format!("MMS sent/recv: {}/{}", c.mms.sent, c.mms.received),
+        format!("Saved data: {}", c.storage),
         format!("Uptime: {}", duration(c.now / 1000)),
     ];
     v.iter_mut().for_each(|l| *l = trunc(l, W));
@@ -1492,6 +1493,8 @@ impl SettingsScreen {
             "Phone status".to_string(),
             "AT command log".to_string(),
             "About".to_string(),
+            "Restart phone".to_string(),
+            "Power off".to_string(),
         ]
     }
 }
@@ -1503,7 +1506,7 @@ impl Screen for SettingsScreen {
         f.soft("", "Change", "Back");
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
-        if nav_list(k, &mut self.sel, 11) {
+        if nav_list(k, &mut self.sel, 13) {
             return Nav::Stay;
         }
         if k == Key::Back {
@@ -1532,6 +1535,8 @@ impl Screen for SettingsScreen {
                 let lines: Vec<String> = c.modem.trace.iter().rev().take(40).flat_map(|l| wrap(l, W)).collect();
                 return push(MsgBox::lines("AT log (newest)", lines));
             }
+            11 => return push(Menu::new("Restart phone?", &["Restart", "Cancel"], 6)),
+            12 => return push(Menu::new("Power off?", &["Power off", "Cancel"], 7)),
             _ => {
                 return push(MsgBox::new(
                     "About",
@@ -1542,8 +1547,11 @@ impl Screen for SettingsScreen {
         Nav::Stay
     }
     fn result(&mut self, c: &mut Core, i: usize, tag: u32) -> Nav {
-        if tag == 4 {
-            c.set_net_mode([NetMode::Auto5g, NetMode::Lte, NetMode::Nr][i.min(2)]);
+        match (tag, i) {
+            (4, _) => c.set_net_mode([NetMode::Auto5g, NetMode::Lte, NetMode::Nr][i.min(2)]),
+            (6, 0) => c.power_request = Some(crate::services::Power::Restart),
+            (7, 0) => c.power_request = Some(crate::services::Power::Off),
+            _ => {}
         }
         Nav::Stay
     }

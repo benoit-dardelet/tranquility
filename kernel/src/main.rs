@@ -29,6 +29,8 @@ mod heap;
 mod keys;
 mod mmu;
 mod platform;
+mod psci;
+mod ramstore;
 mod timer;
 mod vblk;
 mod virtio;
@@ -135,7 +137,12 @@ pub extern "C" fn kmain(dtb: usize, load: usize) -> ! {
             }
         }
     }
-    kprintln!("  storage: {}", if disk.is_some() { "virtio-blk" } else { "none (data is not saved)" });
+    let storage = match (&disk, plat.persist) {
+        (Some(_), _) => String::from("disk"),
+        (None, Some((_, s))) => alloc::format!("RAM {} KiB (kept on restart)", s >> 10),
+        (None, None) => String::from("not saved"),
+    };
+    kprintln!("  storage: {}", storage);
     kprintln!("  audio: {}", if sound.is_some() { "virtio-snd 48 kHz" } else { "none" });
     kprintln!("  keypad: {}", if kbd.is_some() { "virtio keyboard" } else if uart::present() { "serial console" } else { "none: demo mode" });
     kprintln!("  baseband: simulated TQ-5G1 over AT link");
@@ -147,8 +154,11 @@ pub extern "C" fn kmain(dtb: usize, load: usize) -> ! {
     }
 
     let mut phone = Phone::new(Box::new(SimModem::new()), timer::now_ms);
+    phone.core.storage = storage;
     if let Some(d) = disk {
         phone.set_storage(Box::new(BlockStore::new(d)));
+    } else if let Some((b, s)) = plat.persist {
+        phone.set_storage(Box::new(BlockStore::new(ramstore::RamStore::new(b as usize, s as usize))));
     }
     phone.boot();
     let mut autopilot = (!uart::present() && kbd.is_none()).then(Autopilot::new);
@@ -179,6 +189,9 @@ pub extern "C" fn kmain(dtb: usize, load: usize) -> ! {
             phone.key(k);
         }
         phone.step(now);
+        if let Some(req) = phone.take_power_request() {
+            power(req, plat.psci, &mut phone, &mut raster, &mut display);
+        }
         if let Some(s) = &mut sound {
             s.pump(&mut |buf| phone.audio(buf));
         }
@@ -197,6 +210,30 @@ pub extern "C" fn kmain(dtb: usize, load: usize) -> ! {
             }
         }
         idle(irqs);
+    }
+}
+
+/// Restart or power off through PSCI (data was saved by the phone first).
+fn power(req: phone::services::Power, conduit: Option<psci::Conduit>, phone: &mut Phone, raster: &mut Option<Raster>, display: &mut Option<fb::Fb>) {
+    use phone::services::Power;
+    let (msg, func) = match req {
+        Power::Restart => ("Restarting…", psci::SYSTEM_RESET),
+        Power::Off => ("Goodbye", psci::SYSTEM_OFF),
+    };
+    kprintln!("\r\n{}", msg);
+    if let (Some(r), Some(d)) = (raster.as_mut(), display.as_mut()) {
+        let mut f = phone.render();
+        f.lines = alloc::vec![String::new(); phone::ui::ROWS];
+        f.lines[4] = phone::util::center(msg, phone::ui::W);
+        f.soft = Default::default();
+        r.draw(&f, d);
+    }
+    match conduit {
+        Some(c) => {
+            psci::call(c, func);
+            phone.core.toast("Restart not supported by firmware");
+        }
+        None => phone.core.toast("Restart not available: hold the power button"),
     }
 }
 
@@ -238,6 +275,7 @@ const SCRIPT: &[Act] = &[
     Act::W(4000),
     Act::K(Key::Left),
     Act::W(1200),
+    Act::K(Key::Down), // past "New message" and "New group"
     Act::K(Key::Down),
     Act::K(Key::Ok),
     Act::W(3000),
@@ -257,6 +295,7 @@ const SCRIPT: &[Act] = &[
     Act::W(6000),
     Act::K(Key::Left),
     Act::W(1000),
+    Act::K(Key::Down),
     Act::K(Key::Down),
     Act::K(Key::Ok),
     Act::W(5000),

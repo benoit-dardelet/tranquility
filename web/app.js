@@ -23,7 +23,7 @@ function renderDevices() {
     b.setAttribute("role", "radio");
     b.setAttribute("aria-checked", "false");
     const [cls, txt] = unlockTag[d.unlock];
-    b.innerHTML = `<span class="name"></span><span class="meta"></span><span class="tag ${cls}">${txt}</span> <span class="tag mid">untested</span>`;
+    b.innerHTML = `<span class="name"></span><span class="meta"></span><span class="tag ${cls}">${txt}</span> <span class="tag mid">untested</span>${d.dt.ramoops ? ' <span class="tag good">keeps data</span>' : ""}`;
     b.querySelector(".name").textContent = d.name;
     b.querySelector(".meta").textContent = `${d.soc} · ${d.year} · ${d.price}`;
     b.addEventListener("click", () => selectDevice(d, b));

@@ -94,11 +94,23 @@ pub struct Phone {
     saved: Vec<u8>,
     last_save: u64,
     pub restored: bool,
+    save_warned: bool,
 }
 
 impl Phone {
     pub fn new(link: Box<dyn Link>, clock: Clock) -> Phone {
-        Phone { core: Core::new(link, clock), stack: Vec::new(), toast: None, sound: crate::audio::Audio::new(), storage: None, saved: Vec::new(), last_save: 0, restored: false }
+        Phone { core: Core::new(link, clock), stack: Vec::new(), toast: None, sound: crate::audio::Audio::new(), storage: None, saved: Vec::new(), last_save: 0, restored: false, save_warned: false }
+    }
+
+    /// A restart or power-off the user asked for. Data is saved first;
+    /// returns None (and tells the user) if saving failed.
+    pub fn take_power_request(&mut self) -> Option<crate::services::Power> {
+        let p = self.core.power_request.take()?;
+        if self.storage.is_some() && !self.save() {
+            self.toast("Couldn't save data: not restarting");
+            return None;
+        }
+        Some(p)
     }
 
     /// Pull 48 kHz mono samples for the speaker.
@@ -208,7 +220,12 @@ impl Phone {
         }
         if self.storage.is_some() && now.saturating_sub(self.last_save) >= 2000 {
             self.last_save = now;
-            self.save();
+            if self.save() {
+                self.save_warned = false;
+            } else if !self.save_warned {
+                self.save_warned = true;
+                self.toast("Storage full: delete old conversations");
+            }
         }
         if self.toast.as_ref().is_some_and(|(_, t)| now > *t) {
             self.toast = None;

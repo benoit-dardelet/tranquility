@@ -36,7 +36,12 @@ export function deviceTree(dev) {
   root.child(`memory@${hex(d.ram)}`).prop("device_type", "memory").prop("reg", [...cells64(d.ram), ...cells64(d.ramSize ?? 0)]);
   const rm = root.child("reserved-memory");
   rm.prop("#address-cells", [2]).prop("#size-cells", [2]).prop("ranges", true);
-  for (const [a, s] of mergeRegions(d.reserved)) rm.child(`memory@${hex(a)}`).prop("reg", [...cells64(a), ...cells64(s)]).prop("no-map", true);
+  const ro = d.ramoops;
+  if (ro) {
+    rm.child(`ramoops@${hex(ro[0])}`).prop("compatible", "ramoops").prop("reg", [...cells64(ro[0]), ...cells64(ro[1])]).prop("no-map", true);
+  }
+  const outside = (a, s) => !ro || a + s <= ro[0] || a >= ro[0] + ro[1];
+  for (const [a, s] of mergeRegions(d.reserved.filter(([a, s]) => outside(a, s)))) rm.child(`memory@${hex(a)}`).prop("reg", [...cells64(a), ...cells64(s)]).prop("no-map", true);
   const gic = root.child(`interrupt-controller@${hex(d.gic.dist)}`);
   gic.prop("compatible", "arm,gic-v3")
     .prop("#interrupt-cells", [3])
@@ -44,6 +49,7 @@ export function deviceTree(dev) {
     .prop("reg", [...cells64(d.gic.dist), ...cells64(0x10000), ...cells64(d.gic.redist), ...cells64(d.gic.redistSize)])
     .prop("phandle", [1]);
   root.prop("interrupt-parent", [1]);
+  if (d.psci) root.child("psci").prop("compatible", ["arm,psci-1.0", "arm,psci-0.2"]).prop("method", d.psci);
   root.child("timer").prop("compatible", "arm,armv8-timer").prop("interrupts", d.timer.flatMap((p) => [1, p, 0xf08]));
   return buildDtb(root);
 }

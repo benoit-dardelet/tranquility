@@ -73,10 +73,17 @@ is designed to:
 - find the display the bootloader left on (`simple-framebuffer`);
 - keep its memory out of every reserved firmware region;
 - run the interface. With no input driver, it plays a short scripted demo:
-  unlocks the SIM, receives a chat, answers a call.
+  unlocks the SIM, receives a chat, answers a call;
+- keep messages, contacts, call log and settings across a restart. It
+  stores them in the RAM region mainline Linux reserves for crash logs
+  ("ramoops"), which phones preserve across a warm reset. This works on the
+  OnePlus 6/6T, SHIFT6mq and Fairphone 4, which define one, and needs
+  **Settings → Restart** (a PSCI warm reset). Holding the power button may
+  do a hard reset that clears RAM, and a power-off always does. The Pixel
+  3a/3a XL and Poco F1 don't keep data yet.
 
 Phone hardware drivers don't exist yet: no modem, touchscreen, buttons,
-audio codec or UFS/eMMC storage. Until they do, the phone side is a demo,
+audio codec or UFS/eMMC flash storage (so nothing survives a power-off). Until they do, the phone side is a demo,
 and it can't place real calls or send real texts. The modem in particular
 is hard: Qualcomm basebands need remoteproc firmware loading and QMI, not
 AT commands over a UART.
@@ -106,6 +113,7 @@ kernel/            bare-metal aarch64, ~2,100 lines
   fb.rs fwcfg.rs   framebuffer: bootloader simple-framebuffer or QEMU ramfb
   virtio.rs        virtio-mmio v2 + split queues
   vblk.rs vsnd.rs vinput.rs   disk, sound, keyboard
+  ramstore.rs psci.rs   restart-surviving RAM storage, restart / power off
   main.rs          init, event loop, demo autopilot, on-screen panics
 
 phone/             no_std + alloc, host-testable, ~10,000 lines
@@ -150,7 +158,9 @@ web/               installer, ~1,100 lines, no dependencies or build step
   back automatically to SMS, MMS or group MMS.
 - **Saved data.** Contacts, conversations (attachments included), call log
   and settings, written every 2 s when changed. Two alternating slots with
-  CRCs survive a power cut mid-write.
+  CRCs survive a power cut mid-write. In QEMU it goes on a virtio disk. On
+  phones it goes in a restart-surviving RAM region. Settings → Restart and
+  Power off use PSCI.
 - **Other.** USSD, `*#06#`, cell-broadcast alerts, clock with alarm and
   snooze, stopwatch, calculator, settings, phone status, AT log.
 

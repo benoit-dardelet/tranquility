@@ -3,6 +3,10 @@
 // from the mainline Linux device trees (arch/arm64/boot/dts/qcom).
 //
 // None of these has been tested with Tranquility on real hardware yet.
+//
+// `ramoops` is the RAM region mainline Linux reserves for crash logs that
+// survive a restart; Tranquility keeps the user's data there. Phones
+// without one in mainline don't keep data.
 
 const SDM845_GIC = { dist: 0x17a00000, redist: 0x17a60000, redistSize: 0x100000 };
 // Qualcomm wires the arch timer to PPIs 1 (secure), 2 (phys), 3 (virt), 0 (hyp).
@@ -37,6 +41,7 @@ export const DEVICES = [
       compatible: ["google,sargo", "qcom,sdm670"],
       fb: { base: 0x9c000000, size: 0x2400000, width: 1080, height: 2220, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm670-google"],
+      psci: "smc",
     },
   },
   {
@@ -57,6 +62,7 @@ export const DEVICES = [
       compatible: ["google,bonito", "qcom,sdm670"],
       fb: { base: 0x9c000000, size: 0x2400000, width: 1080, height: 2160, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm670-google"],
+      psci: "smc",
     },
   },
   {
@@ -78,6 +84,7 @@ export const DEVICES = [
       msmId: [321, 0x20001], boardId: [8, 0, 17819, 22],
       fb: { base: 0x9d400000, size: 0x2400000, width: 1080, height: 2280, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm845-oneplus"],
+      psci: "smc", ramoops: [0xac300000, 0x400000],
     },
   },
   {
@@ -99,6 +106,7 @@ export const DEVICES = [
       msmId: [321, 0x20001], boardId: [8, 0, 18801, 41],
       fb: { base: 0x9d400000, size: 0x2400000, width: 1080, height: 2340, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm845-oneplus"],
+      psci: "smc", ramoops: [0xac300000, 0x400000],
     },
   },
   {
@@ -120,6 +128,7 @@ export const DEVICES = [
       msmId: [321, 0x20001], boardId: [11, 0],
       fb: { base: 0x9d400000, size: 0x2400000, width: 1080, height: 2160, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm845-axolotl"],
+      psci: "smc", ramoops: [0xb0000000, 0x400000],
     },
   },
   {
@@ -141,6 +150,7 @@ export const DEVICES = [
       msmId: [321, 0x20001], boardId: [69, 0],
       fb: { base: 0x9d400000, size: 0x2400000, width: 1080, height: 2246, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sdm845-beryllium"],
+      psci: "smc",
     },
   },
   {
@@ -162,6 +172,7 @@ export const DEVICES = [
       msmId: [459, 0x10000], boardId: [8, 32],
       fb: { base: 0xa0000000, size: 2340 * 1080 * 4, width: 1080, height: 2340, format: "a8r8g8b8" },
       gic: SDM845_GIC, timer: QCOM_TIMER, ram: 0x80000000, reserved: RESERVED["sm7225-fp4"],
+      psci: "smc", ramoops: [0xffc00000, 0x100000],
     },
   },
 ];
@@ -182,5 +193,6 @@ export const QEMU_PHONE = {
     ram: 0x40000000,
     ramSize: 0x10000000,
     reserved: [[0x4f000000, 0x100000]],
+      psci: "hvc", ramoops: [0x4f400000, 0x400000],
   },
 };
