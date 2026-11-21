@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tranquility Installer</title>
+  <meta name="description" content="Install the Tranquility dumbphone OS on a bootloader-unlockable Android phone, from your browser.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>Tranquility <span class="muted">installer</span></h1>
+      <p class="lede">A tiny dumbphone OS written in Rust. Try it on a cheap, unlockable Android phone, straight from this page.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="banner warn" role="note">
+      <strong>Experimental: not yet tested on real phones.</strong>
+      On a phone it can boot and draw its interface through the bootloader's display, then run a short demo.
+      There are no drivers yet for the phone's modem, buttons, touchscreen, sound or storage, so it can't make real
+      calls or texts there. Start with <em>Try it</em>, which changes nothing on the phone.
+    </section>
+
+    <section id="nousb" class="banner bad" hidden>
+      <strong>This browser can't talk to USB devices.</strong>
+      Use Chrome, Edge, Brave or another Chromium browser on a computer (or on another Android phone with a USB-C cable).
+      Firefox and Safari don't support WebUSB.
+    </section>
+
+    <ol class="steps">
+      <li class="step" id="step-device">
+        <h2>Pick your phone</h2>
+        <div id="devices" class="devices" role="radiogroup" aria-label="Phone model"></div>
+      </li>
+
+      <li class="step" id="step-prepare">
+        <h2>Get it ready</h2>
+        <ul class="checklist">
+          <li>Back up anything you care about. Unlocking the bootloader <strong>erases the phone</strong>.</li>
+          <li>Charge it to at least 50%.</li>
+          <li>In Android: Settings → About phone → tap <em>Build number</em> 7 times, then Settings → System → Developer options → turn on <em>OEM unlocking</em>.</li>
+          <li>Put the phone in fastboot mode: <span id="keys">pick a phone above</span> Or, with USB debugging on: <code>adb reboot bootloader</code></li>
+          <li>Connect it to this computer with a data USB cable.</li>
+        </ul>
+        <details class="small">
+          <summary>Linux or Windows doesn't see the phone?</summary>
+          <p><strong>Linux:</strong> your user needs access to the device. Install your distribution's <code>android-udev-rules</code> package (or add a udev rule for the phone's USB vendor ID), then unplug and replug.</p>
+          <p><strong>Windows:</strong> install Google's USB driver (it binds fastboot devices to WinUSB), or use Zadig to assign WinUSB to the fastboot interface.</p>
+          <p>Close any other program using the phone (Android Studio, <code>adb</code>, another tab with this page).</p>
+        </details>
+      </li>
+
+      <li class="step" id="step-connect">
+        <h2>Connect</h2>
+        <button id="connect" class="primary">Connect phone</button>
+        <div id="info" class="info" hidden></div>
+      </li>
+
+      <li class="step" id="step-unlock" hidden>
+        <h2>Unlock the bootloader</h2>
+        <p id="unlock-note"></p>
+        <p class="bad-text"><strong>This erases all data on the phone.</strong> You will confirm on the phone itself with the volume and power keys.</p>
+        <label class="confirm"><input type="checkbox" id="unlock-ok"> I understand that my phone will be wiped.</label>
+        <button id="unlock" disabled>Unlock bootloader</button>
+      </li>
+
+      <li class="step" id="step-try">
+        <h2>Try it <span class="tag good">safe</span></h2>
+        <p>Sends Tranquility to the phone's memory and starts it. <strong>Nothing is written to storage</strong>: hold the power button for ~10 seconds to go back to Android.</p>
+        <button id="try" class="primary" disabled>Boot Tranquility</button>
+        <progress id="progress" max="1" value="0" hidden></progress>
+      </li>
+
+      <li class="step" id="step-install">
+        <h2>Install <span class="tag bad">replaces Android</span></h2>
+        <p>Writes Tranquility to the boot partition of the active slot, so Android won't start until you restore the original boot image.
+          Get your phone's <em>stock boot.img</em> from its official factory image <strong>before</strong> you do this.</p>
+        <label class="confirm">Type <code>INSTALL</code> to enable: <input id="install-word" autocomplete="off" spellcheck="false" size="10"></label>
+        <button id="install" disabled>Install to boot partition</button>
+      </li>
+
+      <li class="step" id="step-restore">
+        <h2>Restore Android</h2>
+        <p>Flash your phone's original <code>boot.img</code> back.</p>
+        <input type="file" id="stock" accept=".img">
+        <button id="restore" disabled>Restore boot image</button>
+        <button id="reboot" disabled>Reboot phone</button>
+      </li>
+    </ol>
+
+    <section class="aside">
+      <h2>Prefer the command line?</h2>
+      <p><button id="download" disabled>Download boot.img</button> for the selected phone, then:</p>
+      <pre><code>fastboot boot tranquility-&lt;phone&gt;.img</code></pre>
+      <p>No phone? Run it in QEMU: <code>make run</code> (terminal) or <code>make run-gui</code> (window, sound, saved data).</p>
+    </section>
+
+    <section class="aside">
+      <h2>Log</h2>
+      <pre id="log" class="log" aria-live="polite"></pre>
+    </section>
+  </main>
+
+  <footer class="wrap muted small">
+    Boot parameters come from postmarketOS device data; display and memory maps from mainline Linux device trees.
+    Unlocking voids some warranties. You are responsible for your device.
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

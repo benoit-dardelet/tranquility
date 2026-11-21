@@ -847,6 +847,27 @@ impl Core {
         self.events.push_back(Event::NewMessage { number: number.to_string(), transport });
     }
 
+    /// Which transport a message to `to` would use right now.
+    pub fn planned_transport(&self, to: &str, attachments: bool, force_sms: bool) -> Transport {
+        let rcs_ok = !force_sms && self.rcs_usable();
+        if to.starts_with(GROUP_PREFIX) {
+            let members = self.thread(to).map(|t| t.members.clone()).unwrap_or_default();
+            if rcs_ok && !members.is_empty() && members.iter().all(|m| self.peer_rcs(m) == Some(true)) {
+                Transport::Rcs
+            } else {
+                Transport::Mms
+            }
+        } else if rcs_ok && attachments && self.peer_rcs(to) == Some(true) {
+            Transport::Rcs // file transfer only to peers known to support it
+        } else if rcs_ok && !attachments && self.peer_rcs(to) != Some(false) {
+            Transport::Rcs
+        } else if attachments {
+            Transport::Mms
+        } else {
+            Transport::Sms
+        }
+    }
+
     /// Send a message, choosing RCS → SMS (or MMS for attachments).
     ///
     /// * 1:1 text: RCS chat if available, SMS otherwise.
@@ -854,23 +875,10 @@ impl Core {
     /// * group: RCS group chat if every member can chat, group MMS otherwise.
     pub fn send_message(&mut self, to: &str, text: &str, attachments: Vec<Part>, force_sms: bool) -> u32 {
         let to = if to.starts_with(GROUP_PREFIX) { to.to_string() } else { util::normalize_number(to) };
+        let transport = self.planned_transport(&to, !attachments.is_empty(), force_sms);
         let t = self.thread_idx(&to);
         let group = self.threads[t].is_group();
         let members = self.threads[t].members.clone();
-        let rcs_ok = !force_sms && self.rcs_usable();
-        let transport = if group {
-            if rcs_ok && !members.is_empty() && members.iter().all(|m| self.peer_rcs(m) == Some(true)) {
-                Transport::Rcs
-            } else {
-                Transport::Mms
-            }
-        } else if rcs_ok && self.peer_rcs(&to) != Some(false) {
-            Transport::Rcs
-        } else if !attachments.is_empty() {
-            Transport::Mms
-        } else {
-            Transport::Sms
-        };
         let mut m = self.new_msg(false, transport, text);
         m.attachments = attachments.clone();
         let id = m.id;

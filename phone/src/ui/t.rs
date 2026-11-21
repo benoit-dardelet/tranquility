@@ -290,3 +290,24 @@ fn raster_layout_and_diff() {
         std::fs::write(format!("{}/thread.ppm", dir), img.ppm()).unwrap();
     }
 }
+
+#[test]
+fn create_group_from_ui() {
+    let mut p = phone();
+    // Messages → New group → pick Alice and Carol → Next → name "Hike" → Create
+    keys(&mut p, &[Key::Left, Key::Down, Key::Ok]);
+    assert!(screen(&p).contains("New group (0)"), "{}", screen(&p));
+    keys(&mut p, &[Key::Ok, Key::Down, Key::Down, Key::Ok]); // Alice, (Bob skipped), Carol
+    run(&mut p, 1000);
+    assert!(screen(&p).contains("New group (2)"), "{}", screen(&p));
+    keys(&mut p, &[Key::Opt]);
+    typed(&mut p, "Hike");
+    keys(&mut p, &[Key::Ok]);
+    assert!(screen(&p).contains("Group chat"), "{}", screen(&p));
+    typed(&mut p, "saturday?");
+    keys(&mut p, &[Key::Ok]);
+    run(&mut p, 8000);
+    let s = screen(&p);
+    assert!(s.contains("Hike · Chat"), "{}", s);
+    assert!(s.contains("Alice") && s.contains("Carol"), "senders shown: {}", s);
+}

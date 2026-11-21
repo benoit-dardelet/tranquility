@@ -1,0 +1,42 @@
+name: Build, test and publish the installer
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Tools for cross-checking boot images and device trees
+        run: sudo apt-get update && sudo apt-get install -y device-tree-compiler mkbootimg
+      - name: Phone stack tests
+        run: cd phone && cargo test
+      - name: Kernel image and site
+        run: make web
+      - name: Installer tests
+        run: node --test web/test/*.test.mjs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -495,7 +495,7 @@ pub struct Threads {
 impl Screen for Threads {
     fn render(&self, c: &Core, f: &mut Frame) {
         f.title = "Messages".into();
-        let mut items = vec!["✎ New message".to_string()];
+        let mut items = vec!["✎ New message".to_string(), "✎ New group".to_string()];
         for i in sorted_threads(c) {
             let t = &c.threads[i];
             let last = t.msgs.last().unwrap();
@@ -508,7 +508,7 @@ impl Screen for Threads {
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         let order = sorted_threads(c);
-        let len = order.len() + 1;
+        let len = order.len() + 2;
         if self.sel >= len {
             self.sel = len - 1;
         }
@@ -517,9 +517,10 @@ impl Screen for Threads {
         }
         match k {
             Key::Ok if self.sel == 0 => push(NewMessage::default()),
-            Key::Ok => push(ThreadView::new(&c.threads[order[self.sel - 1]].number)),
-            Key::Opt if self.sel > 0 => {
-                let n = c.threads[order[self.sel - 1]].number.clone();
+            Key::Ok if self.sel == 1 => push(NewGroup::default()),
+            Key::Ok => push(ThreadView::new(&c.threads[order[self.sel - 2]].number)),
+            Key::Opt if self.sel > 1 => {
+                let n = c.threads[order[self.sel - 2]].number.clone();
                 c.delete_thread(&n);
                 c.toast("Conversation deleted");
                 Nav::Stay
@@ -578,6 +579,80 @@ impl Screen for NewMessage {
     }
 }
 
+/// Pick group members (OK toggles), then name the group.
+#[derive(Default)]
+pub struct NewGroup {
+    sel: usize,
+    picked: Vec<usize>,
+    naming: Option<TextInput>,
+}
+
+impl Screen for NewGroup {
+    fn render(&self, c: &Core, f: &mut Frame) {
+        if let Some(name) = &self.naming {
+            f.title = "Group name".into();
+            for l in name.lines(W, c.now).iter().take(3) {
+                f.line(l);
+            }
+            f.line("");
+            f.line(&format!("{} members + you", self.picked.len()));
+            f.soft("", "Create", name.mode_label());
+            return;
+        }
+        f.title = format!("New group ({})", self.picked.len());
+        let order = sorted_contacts(c);
+        let items: Vec<String> = order.iter().map(|&i| format!("{} {}", if self.picked.contains(&i) { "[x]" } else { "[ ]" }, c.contacts[i].name)).collect();
+        list(f, &items, self.sel, ROWS);
+        f.soft(if self.picked.len() >= 2 { "Next" } else { "" }, "Select", "Back");
+    }
+    fn key(&mut self, c: &mut Core, k: Key) -> Nav {
+        if let Some(name) = &mut self.naming {
+            return match k {
+                Key::Ok => {
+                    let members: Vec<String> = self.picked.iter().filter_map(|&i| c.contacts.get(i).map(|x| x.number.clone())).collect();
+                    let key = c.create_group(name.text.trim(), &members, None);
+                    Nav::Replace(Box::new(Compose::new(&key)))
+                }
+                Key::Back if name.text.is_empty() => {
+                    self.naming = None;
+                    Nav::Stay
+                }
+                _ => {
+                    name.key(k, c.now);
+                    Nav::Stay
+                }
+            };
+        }
+        let order = sorted_contacts(c);
+        if nav_list(k, &mut self.sel, order.len()) {
+            return Nav::Stay;
+        }
+        match k {
+            Key::Ok => {
+                if let Some(&i) = order.get(self.sel) {
+                    match self.picked.iter().position(|&p| p == i) {
+                        Some(p) => {
+                            self.picked.remove(p);
+                        }
+                        None => {
+                            self.picked.push(i);
+                            let n = c.contacts[i].number.clone();
+                            c.rcs_query_caps(&n);
+                        }
+                    }
+                }
+                Nav::Stay
+            }
+            Key::Opt if self.picked.len() >= 2 => {
+                self.naming = Some(TextInput::new(Mode::Sentence));
+                Nav::Stay
+            }
+            Key::Back => Nav::Pop,
+            _ => Nav::Stay,
+        }
+    }
+}
+
 pub struct ThreadView {
     number: String,
     scroll: usize,
@@ -624,7 +699,8 @@ impl ThreadView {
         };
         let name = c.name_for(&self.number);
         for m in &t.msgs {
-            let who = if m.incoming { name.as_str() } else { "Me" };
+            let sender = if t.is_group() && !m.from.is_empty() { c.name_for(&m.from) } else { name.clone() };
+            let who = if m.incoming { sender.as_str() } else { "Me" };
             let t = hhmm(m.time + c.tz_q as i64 * 900);
             let head = if m.incoming { format!("{} {} {}", who, t, m.transport.label()) } else { format!("{} {} {} {}", who, t, m.transport.label(), status_mark(m)) };
             out.push(if m.incoming { head } else { format!("{:>w$}", head, w = W) });
@@ -641,7 +717,8 @@ impl ThreadView {
             }
         }
         if t.typing_until > c.now {
-            out.push(format!("{} is typing…", name));
+            let who = if t.is_group() && !t.typing_who.is_empty() { c.name_for(&t.typing_who) } else { name };
+            out.push(format!("{} is typing…", who));
         }
         out
     }
@@ -653,9 +730,10 @@ impl Screen for ThreadView {
     }
     fn render(&self, c: &Core, f: &mut Frame) {
         let name = c.name_for(&self.number);
-        let tag = match c.peer_rcs(&self.number) {
-            Some(true) if c.rcs_usable() => " · Chat",
-            _ => " · SMS",
+        let tag = match c.planned_transport(&self.number, false, false) {
+            Transport::Rcs => " · Chat",
+            Transport::Mms => " · MMS",
+            Transport::Sms => " · SMS",
         };
         f.title = trunc(&format!("{}{}", name, tag), W);
         let lines = self.build(c);
@@ -684,14 +762,36 @@ impl Screen for ThreadView {
                     }
                 };
             }
+            Key::Opt if self.number.starts_with(crate::services::GROUP_PREFIX) => return push(Menu::new("Group", &["Reply", "Members", "Delete conversation"], 5)),
             Key::Opt => return push(Menu::new("Options", &["Reply", "Call", "Check chat features", "Delete conversation"], 2)),
             Key::Back => return Nav::Pop,
             _ => {}
         }
         Nav::Stay
     }
-    fn result(&mut self, c: &mut Core, i: usize, _tag: u32) -> Nav {
+    fn result(&mut self, c: &mut Core, i: usize, tag: u32) -> Nav {
         let n = self.number.clone();
+        if tag == 5 {
+            return match i {
+                0 => push(Compose::new(&n)),
+                1 => {
+                    let mut lines = vec![String::from("You")];
+                    if let Some(t) = c.thread(&n) {
+                        for m in &t.members {
+                            let chat = if c.peer_rcs(m) == Some(true) { " ◆" } else { "" };
+                            lines.push(trunc(&format!("{} {}{}", c.name_for(m), m, chat), W));
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.push("◆ = can use chat".into());
+                    push(MsgBox::lines("Members", lines))
+                }
+                _ => {
+                    c.delete_thread(&n);
+                    Nav::Pop
+                }
+            };
+        }
         match i {
             0 => push(Compose::new(&n)),
             1 => match c.dial(&n) {
@@ -746,13 +846,7 @@ impl Compose {
     }
 
     fn transport(&self, c: &Core) -> Transport {
-        if !self.atts.is_empty() {
-            Transport::Mms
-        } else if !self.force_sms && c.rcs_usable() && c.peer_rcs(&self.to) != Some(false) {
-            Transport::Rcs
-        } else {
-            Transport::Sms
-        }
+        c.planned_transport(&self.to, !self.atts.is_empty(), self.force_sms)
     }
 }
 
@@ -774,7 +868,10 @@ impl Screen for Compose {
                 let used = segs.last().map(|s| if coding == sms::Coding::Gsm7 { crate::gsm7::encode(s).map(|v| v.len()).unwrap_or(0) } else { s.encode_utf16().count() }).unwrap_or(0);
                 format!("SMS {}/{} ({})", used, per, segs.len().max(1))
             }
+            Transport::Mms if self.to.starts_with(crate::services::GROUP_PREFIX) => "Group MMS".to_string(),
             Transport::Mms => format!("MMS · {} attachment{}", self.atts.len(), if self.atts.len() > 1 { "s" } else { "" }),
+            Transport::Rcs if self.to.starts_with(crate::services::GROUP_PREFIX) => "Group chat".to_string(),
+            Transport::Rcs if !self.atts.is_empty() => "Chat · file".to_string(),
             Transport::Rcs => "Chat message".to_string(),
         };
         f.line(&format!("{:>w$}", format!("{} {}", info, self.input.mode_label()), w = W));
