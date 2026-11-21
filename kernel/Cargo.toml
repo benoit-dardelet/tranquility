@@ -1,0 +1,24 @@
+[package]
+name = "tranquility-kernel"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal aarch64 kernel for the Tranquility dumbphone OS"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+phone = { path = "../phone" }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1
+lto = true
