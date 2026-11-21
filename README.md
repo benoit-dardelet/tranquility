@@ -39,7 +39,7 @@ has no PulseAudio/PipeWire, use `make run AUDIO=none`.
 
 `make web` builds a static site in `web/dist`. Deploy it to any HTTPS host,
 or use the included GitHub Actions workflow, which publishes it to GitHub
-Pages from `main` (enable *Settings → Pages → Source: GitHub Actions*).
+Pages from the default branch (enable *Settings → Pages → Source: GitHub Actions*; private repositories need a paid GitHub plan for Pages).
 Open it in Chrome, Edge or another Chromium browser. The site walks you
 through choosing the phone, preparing it and connecting over USB, then
 offers four actions:
