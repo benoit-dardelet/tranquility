@@ -133,14 +133,24 @@ impl<'a> Fdt<'a> {
         (0..v.len() / step).map(|i| (read(i * step, a), read(i * step + a * 4, s))).collect()
     }
 
-    /// Interrupt specifiers (3-cell GIC style) as INTIDs.
+    /// `#interrupt-cells` of the GIC (3 normally; 4 with PPI partitions, as on Tensor).
+    pub fn interrupt_cells(&self) -> usize {
+        (0..self.nodes.len())
+            .find(|&i| self.prop(i, "interrupt-controller").is_some() && (self.compatible(i, "arm,gic-v3") || self.compatible(i, "arm,cortex-a15-gic") || self.compatible(i, "arm,gic-400")))
+            .and_then(|i| self.u32(i, "#interrupt-cells"))
+            .map(|c| (c as usize).clamp(3, 4))
+            .unwrap_or(3)
+    }
+
+    /// GIC interrupt specifiers as INTIDs.
     pub fn irqs(&self, n: usize) -> Vec<u32> {
         let v = match self.prop(n, "interrupts") {
             Some(v) => v,
             None => return Vec::new(),
         };
-        v.chunks(12)
-            .filter(|c| c.len() == 12)
+        let step = self.interrupt_cells() * 4;
+        v.chunks(step)
+            .filter(|c| c.len() == step)
             .map(|c| {
                 let kind = be32(c, 0).unwrap_or(0);
                 let num = be32(c, 4).unwrap_or(0);

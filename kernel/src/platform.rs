@@ -89,6 +89,14 @@ pub fn discover(f: &Fdt, dtb: usize) -> Platform {
             p.reserved.push((b, (stride * h) as u64));
         }
     }
+    // No framebuffer in the device tree (e.g. the phone's own DTB on a Pixel 6)?
+    // The installer passes it on the command line: tq.fb=<base>,<width>,<height>[,<stride>]
+    if p.fb.is_none() {
+        if let Some(fb) = f.by_path("/chosen").and_then(|c| f.str(c, "bootargs")).and_then(fb_from_bootargs) {
+            p.reserved.push((fb.base as u64, (fb.stride * fb.height) as u64));
+            p.fb = Some(fb);
+        }
+    }
     for n in f.find_compatible(&["virtio,mmio"]) {
         if let Some(&(a, s)) = f.reg(n).first() {
             p.virtio.push(a as usize);
@@ -117,6 +125,21 @@ pub fn discover(f: &Fdt, dtb: usize) -> Platform {
         }
     }
     p
+}
+
+fn num(s: &str) -> Option<usize> {
+    match s.strip_prefix("0x") {
+        Some(h) => usize::from_str_radix(h, 16).ok(),
+        None => s.parse().ok(),
+    }
+}
+
+pub fn fb_from_bootargs(args: &str) -> Option<Fb> {
+    let v = args.split_whitespace().find_map(|a| a.strip_prefix("tq.fb="))?;
+    let n: Vec<usize> = v.split(',').map(num).collect::<Option<Vec<_>>>()?;
+    let (base, w, h) = (*n.first()?, *n.get(1)?, *n.get(2)?);
+    let stride = n.get(3).copied().unwrap_or(w * 4);
+    (w > 0 && h > 0 && w <= 4096 && h <= 4096).then_some(Fb { base, width: w, height: h, stride, bgr: false, clean: true })
 }
 
 /// Pick a heap region: free RAM (not reserved, not the kernel image, the

@@ -22,7 +22,7 @@ pub enum RegState {
 impl RegState {
     pub fn label(self) -> &'static str {
         match self {
-            RegState::Off => "Off",
+            RegState::Off => "Disconnected",
             RegState::Connecting => "Connecting",
             RegState::Registering => "Registering",
             RegState::Registered => "Connected",

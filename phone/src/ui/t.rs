@@ -150,7 +150,7 @@ fn settings_and_ussd() {
     run(&mut p, 1500);
     assert!(screen(&p).contains("Balance"), "{}", screen(&p));
     keys(&mut p, &[Key::Ok, Key::Ok, Key::Num('6')]); // Menu → Settings
-    keys(&mut p, &[Key::Ok, Key::Num('2')]); // network mode → 4G only
+    keys(&mut p, &[Key::Down, Key::Ok, Key::Num('2')]); // network mode → 4G only
     run(&mut p, 4000);
     assert!(screen(&p).contains("4G only"), "{}", screen(&p));
     assert!(p.render().status.starts_with("4G"));
@@ -310,4 +310,122 @@ fn create_group_from_ui() {
     let s = screen(&p);
     assert!(s.contains("Hike · Chat"), "{}", s);
     assert!(s.contains("Alice") && s.contains("Carol"), "senders shown: {}", s);
+}
+
+fn title(p: &Phone) -> String {
+    p.render().title.trim().to_string()
+}
+
+#[test]
+fn nav_back_returns_to_menu_from_every_app() {
+    let mut p = phone();
+    for item in 1..=8u8 {
+        keys(&mut p, &[Key::Ok]);
+        assert_eq!(title(&p), "Menu");
+        let d = p.depth();
+        keys(&mut p, &[Key::Num((b'0' + item) as char)]);
+        assert!(p.depth() > d, "item {} opened nothing", item);
+        let opened = title(&p);
+        // up to 6 Backs (text fields eat some); must land on the menu
+        for _ in 0..6 {
+            if title(&p) == "Menu" {
+                break;
+            }
+            keys(&mut p, &[Key::Back]);
+        }
+        assert_eq!(title(&p), "Menu", "Back from item {} ({}) didn't return to the menu", item, opened);
+        keys(&mut p, &[Key::Back]);
+        assert_eq!(p.depth(), 1, "Back from menu goes home");
+    }
+}
+
+#[test]
+fn nav_send_from_thread_then_back() {
+    let mut p = phone();
+    p.core.send_message("+15550101", "hi", vec![], false);
+    run(&mut p, 6000);
+    keys(&mut p, &[Key::Left]); // Messages
+    let threads_depth = p.depth();
+    keys(&mut p, &[Key::Down, Key::Down, Key::Ok]); // newest thread
+    assert!(title(&p).starts_with("Alice"), "{}", title(&p));
+    keys(&mut p, &[Key::Ok]); // write
+    typed(&mut p, "again");
+    keys(&mut p, &[Key::Ok]); // send
+    assert!(title(&p).starts_with("Alice"));
+    keys(&mut p, &[Key::Back]);
+    assert_eq!(p.depth(), threads_depth, "one Back from the thread returns to the list");
+    assert_eq!(title(&p), "Messages");
+}
+
+#[test]
+fn nav_exit_key_leaves_text_screens() {
+    let mut p = phone();
+    keys(&mut p, &[Key::Left, Key::Ok, Key::Ok]); // Messages → New message → Alice → Compose
+    typed(&mut p, "draft text");
+    assert!(title(&p).starts_with("To "), "{}", title(&p));
+    keys(&mut p, &[Key::Exit]);
+    assert_eq!(title(&p), "Messages", "Exit leaves compose even with text");
+}
+
+#[test]
+fn deletes_ask_first() {
+    let mut p = phone();
+    p.core.send_message("+15550101", "keep me", vec![], false);
+    run(&mut p, 500);
+    keys(&mut p, &[Key::Left, Key::Down, Key::Down, Key::Opt]);
+    assert_eq!(title(&p), "Delete conversation?");
+    keys(&mut p, &[Key::Back]);
+    assert_eq!(p.core.threads.len(), 1, "Back cancels");
+    keys(&mut p, &[Key::Opt, Key::Down, Key::Ok]); // "Cancel"
+    assert_eq!(p.core.threads.len(), 1);
+    keys(&mut p, &[Key::Opt, Key::Ok]); // "Delete"
+    assert!(p.core.threads.iter().all(|t| t.msgs.is_empty()) || p.core.threads.is_empty());
+    let n = p.core.contacts.len();
+    keys(&mut p, &[Key::End, Key::Opt, Key::Down, Key::Ok]); // Contacts → Alice
+    keys(&mut p, &[Key::Num('5')]); // Delete
+    assert_eq!(title(&p), "Delete contact?");
+    keys(&mut p, &[Key::Num('2')]); // Cancel
+    assert_eq!(p.core.contacts.len(), n);
+    keys(&mut p, &[Key::Num('5'), Key::Num('1')]);
+    assert_eq!(p.core.contacts.len(), n - 1);
+    assert_eq!(title(&p), "Contacts");
+}
+
+
+#[test]
+fn languages() {
+    let mut p = phone();
+    // Menu → Settings → Language → Français
+    keys(&mut p, &[Key::Ok, Key::Num('6'), Key::Ok, Key::Num('2')]);
+    assert_eq!(title(&p), "Paramètres");
+    keys(&mut p, &[Key::End]);
+    let s = screen(&p);
+    assert!(s.contains("sam. 21 nov."), "French date: {}", s);
+    assert_eq!(p.render().soft[0], "Noms");
+    // T9 in French: key 3 pressed twice → é; # # → upper case → É
+    keys(&mut p, &[Key::Left, Key::Ok, Key::Ok]); // Messages → New → Alice
+    assert!(title(&p).starts_with("À "), "{}", title(&p));
+    keys(&mut p, &[Key::Num('#'), Key::Num('3'), Key::Num('3'), Key::Num('3'), Key::Num('3')]);
+    run(&mut p, 1200);
+    assert!(screen(&p).contains("é"), "{}", screen(&p));
+    keys(&mut p, &[Key::Exit, Key::Exit, Key::End]);
+    // every language renders every main screen without panicking, and soft keys fit
+    for (i, l) in i18n::Lang::ALL.iter().enumerate() {
+        p.core.settings.language = *l;
+        for item in 1..=8u8 {
+            keys(&mut p, &[Key::Ok, Key::Num((b'0' + item) as char)]);
+            let f = p.render();
+            for sk in &f.soft {
+                assert!(crate::util::char_len(sk) <= 8, "{:?}: {:?}", l, sk);
+            }
+            keys(&mut p, &[Key::End]);
+        }
+        let _ = i;
+    }
+    // the language is saved with the user's data
+    p.core.settings.language = i18n::Lang::De;
+    let snap = p.core.snapshot();
+    let mut q = Phone::new(Box::new(SimModem::new()), clock);
+    assert!(q.core.restore(&snap));
+    assert_eq!(q.core.settings.language, i18n::Lang::De);
 }

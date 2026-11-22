@@ -1,4 +1,5 @@
 //! Multi-tap (T9-style) keypad text entry.
+use super::i18n::{self, Lang};
 use super::Key;
 use crate::prelude::*;
 use crate::util;
@@ -11,7 +12,6 @@ pub enum Mode {
     Num,
 }
 
-const KEYS: [&str; 10] = [" 0", ".,?!1'\"-()@/:", "abc2", "def3", "ghi4", "jkl5", "mno6", "pqrs7", "tuv8", "wxyz9"];
 const STAR: &str = "*+=#%&<>;_$€£";
 const MULTITAP_MS: u64 = 1000;
 
@@ -21,11 +21,13 @@ pub struct TextInput {
     pub mode: Mode,
     last: Option<(char, usize, u64)>,
     pub max: usize,
+    /// keypad letters follow this language (accented letters)
+    pub lang: Lang,
 }
 
 impl TextInput {
     pub fn new(mode: Mode) -> TextInput {
-        TextInput { text: String::new(), mode, last: None, max: 2000 }
+        TextInput { text: String::new(), mode, last: None, max: 2000, lang: Lang::En }
     }
 
     pub fn with(text: &str, mode: Mode) -> TextInput {
@@ -50,8 +52,8 @@ impl TextInput {
 
     fn cased(&self, c: char) -> char {
         match self.mode {
-            Mode::Upper => c.to_ascii_uppercase(),
-            Mode::Sentence if self.sentence_start() => c.to_ascii_uppercase(),
+            Mode::Upper => c.to_uppercase().next().unwrap_or(c),
+            Mode::Sentence if self.sentence_start() => c.to_uppercase().next().unwrap_or(c),
             _ => c,
         }
     }
@@ -100,7 +102,7 @@ impl TextInput {
                         self.text.push(d);
                     }
                 } else {
-                    self.tap(d, KEYS[d as usize - '0' as usize], now);
+                    self.tap(d, i18n::keypad(self.lang)[d as usize - '0' as usize], now);
                 }
                 true
             }

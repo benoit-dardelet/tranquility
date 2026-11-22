@@ -10,7 +10,7 @@ import { gunzipSync } from "node:zlib";
 import { buildBootImg, emptyCpio, parseBootImg } from "../lib/bootimg.js";
 import { DtNode, buildDtb } from "../lib/dtb.js";
 import { Fastboot } from "../lib/fastboot.js";
-import { DEVICES, QEMU_PHONE } from "../lib/devices.js";
+import { DEVICES, NOT_YET, QEMU_PHONE } from "../lib/devices.js";
 import { bootImage, deviceTree, mergeRegions } from "../lib/build.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +29,23 @@ const rand = (n, seed) => {
   for (let i = 0; i < n; i++) b[i] = (x = (x * 1103515245 + 12345) >>> 0) >>> 24;
   return b;
 };
+
+for (const v of [3, 4]) {
+  test(`boot image v${v} is byte-identical to AOSP mkbootimg`, { skip: !have("mkbootimg") }, async () => {
+    const kernel = rand(222223, 6), ramdisk = rand(5001, 7);
+    writeFileSync(join(tmp, "k3"), kernel);
+    writeFileSync(join(tmp, "r3"), ramdisk);
+    mkdirSync(join(tmp, "stub/gki"), { recursive: true });
+    writeFileSync(join(tmp, "stub/gki/__init__.py"), "");
+    writeFileSync(join(tmp, "stub/gki/generate_gki_certificate.py"), "def generate_gki_certificate(*a, **k):\n    raise SystemExit('unused')\n");
+    execFileSync("mkbootimg", ["--kernel", join(tmp, "k3"), "--ramdisk", join(tmp, "r3"), "--cmdline", "tq.fb=0xfac00000,1080,2400",
+      "--header_version", String(v), "-o", join(tmp, `ref${v}.img`)], { env: { ...process.env, PYTHONPATH: join(tmp, "stub") } });
+    const ref = new Uint8Array(readFileSync(join(tmp, `ref${v}.img`)));
+    const ours = await buildBootImg({ kernel, ramdisk, headerVersion: v, cmdline: "tq.fb=0xfac00000,1080,2400" });
+    assert.equal(ours.length, ref.length);
+    assert.deepEqual(ours, ref);
+  });
+}
 
 for (const v of [0, 1, 2]) {
   test(`boot image v${v} is byte-identical to AOSP mkbootimg`, { skip: !have("mkbootimg") }, async () => {
@@ -68,6 +85,20 @@ test("DTB writer output is accepted by dtc", { skip: !have("dtc") }, () => {
 test("every device gets a valid DTB and boot image", async () => {
   const gz = existsSync(join(here, "../../build/Image.gz")) ? new Uint8Array(readFileSync(join(here, "../../build/Image.gz"))) : rand(5000, 9);
   for (const d of [...DEVICES, QEMU_PHONE]) {
+    if (!d.dt) {
+      // Tensor Pixels: v4 image, raw kernel, display address on the command line
+      const img = await bootImage(d, gz);
+      const h = parseBootImg(img);
+      assert.equal(h.headerVersion, 4, d.id);
+      assert.match(h.cmdline, /^tq\.fb=0x[0-9a-f]+,\d+,\d+$/, d.id);
+      if (gz[0] === 0x1f) assert.equal(new TextDecoder().decode(img.subarray(4096 + 56, 4096 + 60)), "ARM\x64", "uncompressed Image");
+      if (have("unpack_bootimg")) {
+        writeFileSync(join(tmp, `${d.id}.img`), img);
+        const out = execFileSync("unpack_bootimg", ["--boot_img", join(tmp, `${d.id}.img`), "--out", join(tmp, d.id)]).toString();
+        assert.match(out, /boot image header version: 4/);
+      }
+      continue;
+    }
     const dtb = deviceTree(d);
     if (have("dtc")) {
       writeFileSync(join(tmp, `${d.id}.dtb`), dtb);
@@ -96,12 +127,12 @@ test("every device gets a valid DTB and boot image", async () => {
 
 test("reserved regions are merged, framebuffer stays outside them", () => {
   assert.deepEqual(mergeRegions([[0x10, 0x10], [0x18, 0x10], [0x40, 4]]), [[0x10, 0x18], [0x40, 4]]);
-  for (const d of DEVICES) {
+  for (const d of DEVICES.filter((d) => d.dt)) {
     const rs = mergeRegions(d.dt.reserved);
     for (let i = 1; i < rs.length; i++) assert.ok(rs[i][0] >= rs[i - 1][0] + rs[i - 1][1], d.id);
     // our heap goes after the kernel at the start of DRAM: make sure there's room there
     const firstReserved = rs[0][0];
-    assert.ok(firstReserved === 0x80000000 || firstReserved - 0x80000000 >= 64 * 1024 * 1024 || d.id === "fairphone-fp4", d.id);
+    assert.ok(firstReserved - 0x80000000 >= 64 * 1024 * 1024, d.id);
   }
 });
 
@@ -205,4 +236,11 @@ test("fastboot: a locked bootloader refuses to boot", async () => {
   const fb = new Fastboot(new MockPhone({ unlocked: "no" }));
   await fb.open();
   await assert.rejects(fb.boot(rand(1000, 5)), /FAIL: locked/);
+});
+
+test("only Google Pixels are offered", () => {
+  for (const d of DEVICES) assert.match(d.name, /^Pixel /, d.id);
+  assert.ok(NOT_YET.every(([n]) => n.startsWith("Pixel")));
+  const ids = DEVICES.map((d) => d.id);
+  assert.deepEqual(ids, ["google-blueline", "google-crosshatch", "google-sargo", "google-bonito", "google-oriole", "google-raven", "google-bluejay"]);
 });

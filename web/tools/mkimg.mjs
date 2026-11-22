@@ -19,7 +19,7 @@ if (!targets.length) {
   process.exit(2);
 }
 for (const d of targets) {
-  writeFileSync(`${outDir}/${d.id}.dtb`, deviceTree(d));
+  if (d.dt) writeFileSync(`${outDir}/${d.id}.dtb`, deviceTree(d));
   const img = await bootImage(d, gz);
   writeFileSync(`${outDir}/tranquility-${d.id}.img`, img);
   console.log(`${d.id}: boot.img ${img.length} bytes`);

@@ -39,7 +39,8 @@ const le32 = (x) => {
  */
 export async function buildBootImg(o) {
   const v = o.headerVersion ?? 0;
-  if (v > 2) throw new Error("header v3+ not supported");
+  if (v === 3 || v === 4) return buildV3V4(o, v);
+  if (v > 4) throw new Error(`boot image header v${v} not supported`);
   const page = o.pagesize ?? 4096;
   const base = o.base ?? 0x10000000;
   const kernel = o.kernel;
@@ -95,6 +96,35 @@ export async function buildBootImg(o) {
   return out;
 }
 
+/** Header v3/v4 (Android 11+ GKI devices): fixed 4 KiB pages, no load
+ *  addresses and no DTB; the bootloader takes the DTB from vendor_boot. */
+function buildV3V4(o, v) {
+  const page = 4096;
+  const kernel = o.kernel;
+  const ramdisk = o.ramdisk ?? new Uint8Array(0);
+  const hdrSize = v === 3 ? 1580 : 1584;
+  const hdr = new Uint8Array(hdrSize);
+  const dv = new DataView(hdr.buffer);
+  const w32 = (off, x) => dv.setUint32(off, x >>> 0, true);
+  hdr.set(enc.encode("ANDROID!"), 0);
+  w32(8, kernel.length);
+  w32(12, ramdisk.length);
+  w32(16, o.osVersion ?? 0);
+  w32(20, hdrSize);
+  // 24..40: reserved
+  w32(40, v);
+  const cmd = enc.encode(o.cmdline ?? "");
+  if (cmd.length > 1535) throw new Error("cmdline too long");
+  hdr.set(cmd, 44);
+  if (v === 4) w32(1580, 0); // signature_size: unsigned
+  const pad = (n) => Math.ceil(n / page) * page;
+  const out = new Uint8Array(pad(hdrSize) + pad(kernel.length) + pad(ramdisk.length));
+  out.set(hdr, 0);
+  out.set(kernel, pad(hdrSize));
+  out.set(ramdisk, pad(hdrSize) + pad(kernel.length));
+  return Promise.resolve(out);
+}
+
 /** Minimal valid newc cpio archive (just the trailer): an empty initramfs. */
 export function emptyCpio() {
   const name = "TRAILER!!!\0";
@@ -111,5 +141,10 @@ export function parseBootImg(b) {
   const magic = new TextDecoder().decode(b.subarray(0, 8));
   if (magic !== "ANDROID!") throw new Error("not an Android boot image");
   const r = (o) => dv.getUint32(o, true);
-  return { kernelSize: r(8), kernelAddr: r(12), ramdiskSize: r(16), pagesize: r(36), headerVersion: r(40) };
+  const headerVersion = r(40);
+  if (headerVersion >= 3) {
+    const cmd = new TextDecoder().decode(b.subarray(44, 44 + 1536)).replace(/\0.*$/s, "");
+    return { kernelSize: r(8), ramdiskSize: r(12), pagesize: 4096, headerVersion, cmdline: cmd };
+  }
+  return { kernelSize: r(8), kernelAddr: r(12), ramdiskSize: r(16), pagesize: r(36), headerVersion };
 }

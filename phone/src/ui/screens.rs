@@ -7,17 +7,29 @@ use crate::prelude::*;
 use crate::services::{CallState, Contact, Core, LogKind, Message, NetMode, Status, Transport};
 use crate::sms;
 use crate::util::{self, center, duration, hhmm, same_number, trunc, wrap};
+use super::i18n::{self, Lang};
 
 fn push<S: Screen + 'static>(s: S) -> Nav {
     Nav::Push(Box::new(s))
 }
 
-fn on_off(b: bool) -> &'static str {
-    if b {
-        "On"
-    } else {
-        "Off"
-    }
+/// Translate a UI string into the phone's language.
+fn t(c: &Core, s: &'static str) -> &'static str {
+    i18n::tr(c.settings.language, s)
+}
+
+/// Translate a template and fill its `{}` placeholders.
+fn tf(c: &Core, s: &'static str, args: &[&str]) -> String {
+    i18n::fill(t(c, s), args)
+}
+
+/// Translate a runtime string if it's a known key.
+fn td(c: &Core, s: &str) -> String {
+    i18n::tr_dyn(c.settings.language, s)
+}
+
+fn on_off(c: &Core, b: bool) -> &'static str {
+    t(c, if b { "On" } else { "Off" })
 }
 
 // ------------------------------------------------------------------ big clock font
@@ -65,11 +77,11 @@ impl Menu {
 }
 
 impl Screen for Menu {
-    fn render(&self, _c: &Core, f: &mut Frame) {
-        f.title = self.title.clone();
-        let items: Vec<String> = self.items.iter().enumerate().map(|(i, s)| format!("{} {}", i + 1, s)).collect();
+    fn render(&self, c: &Core, f: &mut Frame) {
+        f.title = td(c, &self.title);
+        let items: Vec<String> = self.items.iter().enumerate().map(|(i, s)| format!("{} {}", i + 1, td(c, s))).collect();
         list(f, &items, self.sel, ROWS);
-        f.soft("", "Select", "Back");
+        f.soft("", t(c, "Select"), t(c, "Back"));
     }
     fn key(&mut self, _c: &mut Core, k: Key) -> Nav {
         if let Key::Num(d @ '1'..='9') = k {
@@ -95,30 +107,35 @@ pub struct MsgBox {
     title: String,
     lines: Vec<String>,
     scroll: usize,
+    alert: bool,
 }
 
 impl MsgBox {
     pub fn new(title: &str, text: &str) -> MsgBox {
-        MsgBox { title: title.into(), lines: wrap(text, W), scroll: 0 }
+        MsgBox { title: title.into(), lines: wrap(text, W), scroll: 0, alert: false }
     }
     pub fn lines(title: &str, lines: Vec<String>) -> MsgBox {
-        MsgBox { title: title.into(), lines, scroll: 0 }
+        MsgBox { title: title.into(), lines, scroll: 0, alert: false }
     }
     pub fn alert(title: &str, text: &str) -> MsgBox {
-        let mut l = vec![center("⚠ EMERGENCY ALERT ⚠", W), String::new()];
+        let mut l = vec![String::new(), String::new()];
         l.extend(wrap(text, W));
-        MsgBox { title: title.to_ascii_uppercase(), lines: l, scroll: 0 }
+        MsgBox { title: title.into(), lines: l, scroll: 0, alert: true }
     }
 }
 
 impl Screen for MsgBox {
-    fn render(&self, _c: &Core, f: &mut Frame) {
-        f.title = self.title.clone();
-        for l in self.lines.iter().skip(self.scroll).take(ROWS) {
-            f.line(l);
+    fn render(&self, c: &Core, f: &mut Frame) {
+        f.title = if self.alert { td(c, &self.title).to_uppercase() } else { td(c, &self.title) };
+        for (i, l) in self.lines.iter().enumerate().skip(self.scroll).take(ROWS) {
+            if self.alert && i == 0 {
+                f.line(&center(t(c, "⚠ EMERGENCY ALERT ⚠"), W));
+            } else {
+                f.line(l);
+            }
         }
         let more = if self.lines.len() > self.scroll + ROWS { "▼" } else { "" };
-        f.soft("", "OK", more);
+        f.soft("", t(c, "OK"), more);
     }
     fn key(&mut self, _c: &mut Core, k: Key) -> Nav {
         match k {
@@ -141,17 +158,17 @@ pub struct PinEntry {
 
 impl Screen for PinEntry {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "SIM locked".into();
+        f.title = t(c, "SIM locked").into();
         f.line("");
-        f.line(&center("Enter SIM PIN", W));
+        f.line(&center(t(c, "Enter SIM PIN"), W));
         f.line("");
         f.line(&center(&"*".repeat(self.pin.len()), W));
         f.line("");
-        f.line(&center(&format!("{} attempts left", c.pin_tries), W));
-        f.line(&center(&self.msg, W));
+        f.line(&center(&tf(c, "{} attempts left", &[&c.pin_tries.to_string()]), W));
+        f.line(&center(&td(c, &self.msg), W));
         f.line("");
-        f.line(&center("Emergency: dial 112", W));
-        f.soft("", "OK", if self.pin.is_empty() { "" } else { "Clear" });
+        f.line(&center(t(c, "Emergency: dial 112"), W));
+        f.soft("", t(c, "OK"), if self.pin.is_empty() { "" } else { t(c, "Clear") });
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -192,38 +209,39 @@ impl Screen for Home {
         for r in big_time(&hhmm(c.local())) {
             f.line(&r);
         }
-        f.line(&center(&format!("{} {} {} {}", util::WEEKDAYS[d.wday as usize], d.day, util::MONTHS[d.month as usize - 1], d.year), W));
+        let l = c.settings.language;
+        f.line(&center(&format!("{} {} {} {}", i18n::weekday(l, d.wday as usize), d.day, i18n::month(l, d.month as usize - 1), d.year), W));
         f.line("");
         let op = if c.settings.airplane {
-            "Airplane mode".to_string()
+            t(c, "Airplane mode").to_string()
         } else if c.sim_locked {
-            "SIM locked".to_string()
+            t(c, "SIM locked").to_string()
         } else if c.net.registered {
             c.net.operator.clone()
         } else if c.net.searching {
-            "Searching…".to_string()
+            t(c, "Searching…").to_string()
         } else {
-            "No service".to_string()
+            t(c, "No service").to_string()
         };
         f.line(&center(&op, W));
         let mut notes = Vec::new();
         let unread = c.unread_total();
         if unread > 0 {
-            notes.push(format!("✉ {} new message{}", unread, if unread > 1 { "s" } else { "" }));
+            notes.push(if unread == 1 { t(c, "✉ 1 new message").to_string() } else { tf(c, "✉ {} new messages", &[&unread.to_string()]) });
         }
         if c.missed > 0 {
-            notes.push(format!("☎ {} missed call{}", c.missed, if c.missed > 1 { "s" } else { "" }));
+            notes.push(if c.missed == 1 { t(c, "☎ 1 missed call").to_string() } else { tf(c, "☎ {} missed calls", &[&c.missed.to_string()]) });
         }
         if c.settings.alarm_on {
             if let Some((h, m)) = c.settings.alarm {
-                notes.push(format!("◷ Alarm {:02}:{:02}", h, m));
+                notes.push(tf(c, "◷ Alarm {}", &[&format!("{:02}:{:02}", h, m)]));
             }
         }
         f.line("");
         for n in notes.iter().take(2) {
             f.line(&center(n, W));
         }
-        f.soft("Names", "Menu", "");
+        f.soft(t(c, "Names"), t(c, "Menu"), "");
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -254,7 +272,7 @@ const MENU: [&str; 8] = ["Messages", "Contacts", "Call log", "Clock & alarm", "C
 
 impl Screen for MainMenu {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Menu".into();
+        f.title = t(c, "Menu").into();
         let items: Vec<String> = MENU
             .iter()
             .enumerate()
@@ -264,11 +282,11 @@ impl Screen for MainMenu {
                     2 if c.missed > 0 => format!(" ({})", c.missed),
                     _ => String::new(),
                 };
-                format!("{} {}{}", i + 1, m, badge)
+                format!("{} {}{}", i + 1, t(c, m), badge)
             })
             .collect();
         list(f, &items, self.sel, ROWS);
-        f.soft("", "Select", "Back");
+        f.soft("", t(c, "Select"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         let pick = match k {
@@ -289,7 +307,7 @@ impl Screen for MainMenu {
             Some(5) => push(SettingsScreen::default()),
             Some(6) => push(Menu::new(
                 "Simulator",
-                &["Incoming call (Bob)", "SMS from Bob", "Chat from Alice", "MMS from Bob", "Emergency alert", "Lose signal 8s", "Long SMS (Carol)"],
+                &["Incoming call (Bob)", "SMS from Bob", "Chat from Alice", "MMS from Bob", "Emergency alert", "Lose signal 8s", "Long SMS (Carol)", "Group chat (Alice)"],
                 1,
             )),
             Some(7) => push(MsgBox::lines("Phone status", status_lines(c))),
@@ -307,22 +325,23 @@ impl Screen for MainMenu {
 
 fn status_lines(c: &Core) -> Vec<String> {
     let n = &c.net;
+    let signal = if n.rssi == 99 { "-".to_string() } else { format!("{} dBm, {}/4", -113 + 2 * n.rssi as i32, n.bars()) };
     let mut v = vec![
-        format!("Network: {}", if n.registered { n.operator.as_str() } else { "none" }),
+        tf(c, "Network: {}", &[if n.registered { n.operator.as_str() } else { t(c, "none") }]),
         format!("RAT: {} (AcT {})", n.rat(), n.act),
-        format!("Signal: {} ({} bars)", if n.rssi == 99 { "-".to_string() } else { format!("{} dBm", -113 + 2 * n.rssi as i32) }, n.bars()),
-        format!("Data: {}", if n.pdp_up { "internet, ims, mms" } else { "off" }),
-        format!("Chat (RCS): {}", c.rcs.state.label()),
-        format!("Battery: {}%", n.battery),
-        format!("Number: {}", c.info.number),
+        tf(c, "Signal: {}", &[&signal]),
+        tf(c, "Data: {}", &[if n.pdp_up { "internet, ims, mms" } else { t(c, "off") }]),
+        format!("Chat (RCS): {}", t(c, c.rcs.state.label())),
+        tf(c, "Battery: {}%", &[&n.battery.to_string()]),
+        tf(c, "Number: {}", &[&c.info.number]),
         format!("IMEI: {}", c.info.imei),
         format!("IMSI: {}", c.info.imsi),
         format!("ICCID: {}", c.info.iccid),
         format!("Modem: {} {}", c.info.manufacturer, c.info.model),
         format!("FW: {}", c.info.firmware),
-        format!("MMS sent/recv: {}/{}", c.mms.sent, c.mms.received),
-        format!("Saved data: {}", c.storage),
-        format!("Uptime: {}", duration(c.now / 1000)),
+        tf(c, "MMS sent/recv: {}", &[&format!("{}/{}", c.mms.sent, c.mms.received)]),
+        tf(c, "Saved data: {}", &[&td(c, &c.storage)]),
+        tf(c, "Uptime: {}", &[&duration(c.now / 1000)]),
     ];
     v.iter_mut().for_each(|l| *l = trunc(l, W));
     v
@@ -336,7 +355,7 @@ pub struct Dialer {
 
 impl Screen for Dialer {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Dial".into();
+        f.title = t(c, "Dial").into();
         f.line("");
         f.line("");
         for l in wrap(&self.number, W - 2).iter().take(3) {
@@ -347,9 +366,9 @@ impl Screen for Dialer {
         if let Some(n) = name {
             f.line(&center(&n, W));
         } else if is_mmi(&self.number) {
-            f.line(&center("Service code", W));
+            f.line(&center(t(c, "Service code"), W));
         }
-        f.soft("Save", "Call", "Clear");
+        f.soft(t(c, "Save"), t(c, "Call"), t(c, "Clear"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -380,7 +399,8 @@ impl Screen for Dialer {
                 return match c.dial(&n) {
                     Ok(()) => Nav::Replace(Box::new(CallScreen::default())),
                     Err(e) => {
-                        c.toast(&format!("Call failed: {}", e));
+                        let m = tf(c, "Call failed: {}", &[&td(c, &e)]);
+                        c.toast(&m);
                         Nav::Stay
                     }
                 };
@@ -411,19 +431,19 @@ impl Screen for CallScreen {
         let call = match &c.call {
             Some(x) => x,
             None => {
-                f.title = "Call".into();
-                f.line(&center("Call ended", W));
+                f.title = t(c, "Voice call").into();
+                f.line(&center(t(c, "Call ended"), W));
                 return;
             }
         };
-        let name = if call.number.is_empty() { "Unknown".to_string() } else { c.name_for(&call.number) };
+        let name = if call.number.is_empty() { t(c, "Unknown").to_string() } else { c.name_for(&call.number) };
         let state = match call.state {
-            CallState::Dialing => "Calling…".to_string(),
-            CallState::Alerting => "Ringing…".to_string(),
-            CallState::Incoming => "Incoming call".to_string(),
+            CallState::Dialing => t(c, "Calling…").to_string(),
+            CallState::Alerting => t(c, "Ringing…").to_string(),
+            CallState::Incoming => t(c, "Incoming call").to_string(),
             CallState::Active => duration(call.connected_at.map(|t| (c.now - t) / 1000).unwrap_or(0)),
         };
-        f.title = if call.emergency { "Emergency call".into() } else { "Voice call".into() };
+        f.title = t(c, if call.emergency { "Emergency call" } else { "Voice call" }).into();
         f.line("");
         f.line(&center(&state, W));
         f.line("");
@@ -436,18 +456,18 @@ impl Screen for CallScreen {
         f.line("");
         let mut flags = vec![if c.net.act == 7 { "HD VoLTE" } else { "HD VoNR" }];
         if call.muted {
-            flags.push("Muted");
+            flags.push(t(c, "Muted"));
         }
         if call.speaker {
-            flags.push("Speaker");
+            flags.push(t(c, "Speaker"));
         }
         f.line(&center(&flags.join(" · "), W));
         f.line("");
         f.line(&center(&self.dtmf, W));
         if call.state == CallState::Incoming {
-            f.soft("Silence", "Answer", "Reject");
+            f.soft(t(c, "Silence"), t(c, "Answer"), t(c, "Reject"));
         } else {
-            f.soft(if call.muted { "Unmute" } else { "Mute" }, if call.speaker { "Handset" } else { "Speaker" }, "End");
+            f.soft(if call.muted { t(c, "Unmute") } else { t(c, "Mute") }, if call.speaker { t(c, "Handset") } else { t(c, "Speaker") }, t(c, "End"));
         }
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
@@ -491,21 +511,22 @@ fn sorted_threads(c: &Core) -> Vec<usize> {
 #[derive(Default)]
 pub struct Threads {
     sel: usize,
+    pending_delete: Option<String>,
 }
 
 impl Screen for Threads {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Messages".into();
-        let mut items = vec!["✎ New message".to_string(), "✎ New group".to_string()];
+        f.title = t(c, "Messages").into();
+        let mut items = vec![t(c, "✎ New message").to_string(), t(c, "✎ New group").to_string()];
         for i in sorted_threads(c) {
-            let t = &c.threads[i];
-            let last = t.msgs.last().unwrap();
-            let mark = if t.unread() > 0 { "●" } else { " " };
-            let snippet = if last.text.is_empty() && !last.attachments.is_empty() { "[picture]".to_string() } else { last.text.replace('\n', " ") };
-            items.push(format!("{}{}: {}", mark, c.name_for(&t.number), snippet));
+            let th = &c.threads[i];
+            let last = th.msgs.last().unwrap();
+            let mark = if th.unread() > 0 { "●" } else { " " };
+            let snippet = if last.text.is_empty() && !last.attachments.is_empty() { t(c, "[picture]").to_string() } else { last.text.replace('\n', " ") };
+            items.push(format!("{}{}: {}", mark, c.name_for(&th.number), snippet));
         }
         list(f, &items, self.sel, ROWS);
-        f.soft("Delete", "Open", "Back");
+        f.soft(t(c, "Delete"), t(c, "Open"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         let order = sorted_threads(c);
@@ -521,14 +542,20 @@ impl Screen for Threads {
             Key::Ok if self.sel == 1 => push(NewGroup::default()),
             Key::Ok => push(ThreadView::new(&c.threads[order[self.sel - 2]].number)),
             Key::Opt if self.sel > 1 => {
-                let n = c.threads[order[self.sel - 2]].number.clone();
-                c.delete_thread(&n);
-                c.toast("Conversation deleted");
-                Nav::Stay
+                self.pending_delete = Some(c.threads[order[self.sel - 2]].number.clone());
+                push(Menu::new("Delete conversation?", &["Delete", "Cancel"], 9))
             }
             Key::Back => Nav::Pop,
             _ => Nav::Stay,
         }
+    }
+    fn result(&mut self, c: &mut Core, i: usize, tag: u32) -> Nav {
+        if let (9, 0, Some(n)) = (tag, i, self.pending_delete.take()) {
+            c.delete_thread(&n);
+            c.toast("Conversation deleted");
+        }
+        self.pending_delete = None;
+        Nav::Stay
     }
 }
 
@@ -540,17 +567,17 @@ pub struct NewMessage {
 
 impl Screen for NewMessage {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "New message".into();
-        f.line(&format!("To: {}_", self.number));
+        f.title = t(c, "New message").into();
+        f.line(&tf(c, "To: {}_", &[&self.number]));
         f.line(&"─".repeat(W));
         let items: Vec<String> = c.contacts.iter().map(|x| format!("{} {}", x.name, x.number)).collect();
         if self.number.is_empty() {
             list(f, &items, self.sel, ROWS - 2);
         } else {
-            f.line("Type a number, or clear");
-            f.line("it to pick a contact.");
+            f.line(t(c, "Type a number, or clear"));
+            f.line(t(c, "it to pick a contact."));
         }
-        f.soft("", "Next", "Back");
+        f.soft("", t(c, "Next"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -591,20 +618,20 @@ pub struct NewGroup {
 impl Screen for NewGroup {
     fn render(&self, c: &Core, f: &mut Frame) {
         if let Some(name) = &self.naming {
-            f.title = "Group name".into();
+            f.title = t(c, "Group name").into();
             for l in name.lines(W, c.now).iter().take(3) {
                 f.line(l);
             }
             f.line("");
-            f.line(&format!("{} members + you", self.picked.len()));
-            f.soft("", "Create", name.mode_label());
+            f.line(&tf(c, "{} members + you", &[&self.picked.len().to_string()]));
+            f.soft("", t(c, "Create"), name.mode_label());
             return;
         }
-        f.title = format!("New group ({})", self.picked.len());
+        f.title = tf(c, "New group ({})", &[&self.picked.len().to_string()]);
         let order = sorted_contacts(c);
         let items: Vec<String> = order.iter().map(|&i| format!("{} {}", if self.picked.contains(&i) { "[x]" } else { "[ ]" }, c.contacts[i].name)).collect();
         list(f, &items, self.sel, ROWS);
-        f.soft(if self.picked.len() >= 2 { "Next" } else { "" }, "Select", "Back");
+        f.soft(if self.picked.len() >= 2 { t(c, "Next") } else { "" }, t(c, "Select"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         if let Some(name) = &mut self.naming {
@@ -619,6 +646,7 @@ impl Screen for NewGroup {
                     Nav::Stay
                 }
                 _ => {
+                    name.lang = c.settings.language;
                     name.key(k, c.now);
                     Nav::Stay
                 }
@@ -666,18 +694,18 @@ impl ThreadView {
     }
 }
 
-fn status_mark(m: &Message) -> &'static str {
+fn status_mark(c: &Core, m: &Message) -> &'static str {
     match m.status {
         Status::Sending => "…",
         Status::Sent => "✓",
         Status::Delivered => "✓✓",
-        Status::Read => "Read",
-        Status::Failed => "! Failed",
+        Status::Read => t(c, "Read"),
+        Status::Failed => t(c, "! Failed"),
         Status::Received => "",
     }
 }
 
-pub fn attachment_lines(p: &Part) -> Vec<String> {
+pub fn attachment_lines(c: &Core, p: &Part) -> Vec<String> {
     if p.content_type.eq_ignore_ascii_case("image/bmp") {
         if let Some(rows) = bmp::render(&p.data) {
             return rows.iter().map(|r| center(r, W)).collect();
@@ -686,7 +714,7 @@ pub fn attachment_lines(p: &Part) -> Vec<String> {
     if p.content_type.to_ascii_lowercase().contains("vcard") {
         let t = String::from_utf8_lossy(&p.data).into_owned();
         let get = |k: &str| t.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_once(':')).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-        return vec![format!(" [Contact] {}", get("FN")), format!("  {}", get("TEL"))];
+        return vec![tf(c, " [Contact] {}", &[&get("FN")]), format!("  {}", get("TEL"))];
     }
     vec![format!(" [{} {}B]", p.name, p.data.len())]
 }
@@ -694,19 +722,19 @@ pub fn attachment_lines(p: &Part) -> Vec<String> {
 impl ThreadView {
     fn build(&self, c: &Core) -> Vec<String> {
         let mut out = Vec::new();
-        let t = match c.threads.iter().find(|t| same_number(&t.number, &self.number)) {
+        let th = match c.threads.iter().find(|t| same_number(&t.number, &self.number)) {
             Some(t) => t,
             None => return out,
         };
         let name = c.name_for(&self.number);
-        for m in &t.msgs {
-            let sender = if t.is_group() && !m.from.is_empty() { c.name_for(&m.from) } else { name.clone() };
-            let who = if m.incoming { sender.as_str() } else { "Me" };
-            let t = hhmm(m.time + c.tz_q as i64 * 900);
-            let head = if m.incoming { format!("{} {} {}", who, t, m.transport.label()) } else { format!("{} {} {} {}", who, t, m.transport.label(), status_mark(m)) };
+        for m in &th.msgs {
+            let sender = if th.is_group() && !m.from.is_empty() { c.name_for(&m.from) } else { name.clone() };
+            let who = if m.incoming { sender.as_str() } else { t(c, "Me") };
+            let when = hhmm(m.time + c.tz_q as i64 * 900);
+            let head = if m.incoming { format!("{} {} {}", who, when, m.transport.label()) } else { format!("{} {} {} {}", who, when, m.transport.label(), status_mark(c, m)) };
             out.push(if m.incoming { head } else { format!("{:>w$}", head, w = W) });
             if let Some(s) = &m.subject {
-                out.push(format!(" Subj: {}", s));
+                out.push(tf(c, " Subj: {}", &[s]));
             }
             if !m.text.is_empty() {
                 for l in wrap(&m.text, W - 1) {
@@ -714,12 +742,12 @@ impl ThreadView {
                 }
             }
             for p in &m.attachments {
-                out.extend(attachment_lines(p));
+                out.extend(attachment_lines(c, p));
             }
         }
-        if t.typing_until > c.now {
-            let who = if t.is_group() && !t.typing_who.is_empty() { c.name_for(&t.typing_who) } else { name };
-            out.push(format!("{} is typing…", who));
+        if th.typing_until > c.now {
+            let who = if th.is_group() && !th.typing_who.is_empty() { c.name_for(&th.typing_who) } else { name };
+            out.push(tf(c, "{} is typing…", &[&who]));
         }
         out
     }
@@ -742,7 +770,7 @@ impl Screen for ThreadView {
         for l in lines.iter().skip(start).take(ROWS) {
             f.line(l);
         }
-        f.soft("Options", "Write", "Back");
+        f.soft(t(c, "Options"), t(c, "Write"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -752,7 +780,7 @@ impl Screen for ThreadView {
                 }
             }
             Key::Down => self.scroll = self.scroll.saturating_sub(1),
-            Key::Ok => return push(Compose::new(&self.number)),
+            Key::Ok => return push(Compose::reply(&self.number)),
             Key::Call => {
                 let n = self.number.clone();
                 return match c.dial(&n) {
@@ -774,9 +802,9 @@ impl Screen for ThreadView {
         let n = self.number.clone();
         if tag == 5 {
             return match i {
-                0 => push(Compose::new(&n)),
+                0 => push(Compose::reply(&n)),
                 1 => {
-                    let mut lines = vec![String::from("You")];
+                    let mut lines = vec![t(c, "You").to_string()];
                     if let Some(t) = c.thread(&n) {
                         for m in &t.members {
                             let chat = if c.peer_rcs(m) == Some(true) { " ◆" } else { "" };
@@ -784,7 +812,7 @@ impl Screen for ThreadView {
                         }
                     }
                     lines.push(String::new());
-                    lines.push("◆ = can use chat".into());
+                    lines.push(t(c, "◆ = can use chat").into());
                     push(MsgBox::lines("Members", lines))
                 }
                 _ => {
@@ -794,7 +822,7 @@ impl Screen for ThreadView {
             };
         }
         match i {
-            0 => push(Compose::new(&n)),
+            0 => push(Compose::reply(&n)),
             1 => match c.dial(&n) {
                 Ok(()) => push(CallScreen::default()),
                 Err(e) => {
@@ -835,6 +863,8 @@ impl Screen for ThreadView {
 
 pub struct Compose {
     to: String,
+    /// opened from the conversation itself: return to it instead of opening another
+    reply: bool,
     input: TextInput,
     atts: Vec<Part>,
     force_sms: bool,
@@ -842,8 +872,14 @@ pub struct Compose {
 }
 
 impl Compose {
+    pub fn reply(to: &str) -> Compose {
+        let mut c = Compose::new(to);
+        c.reply = true;
+        c
+    }
+
     pub fn new(to: &str) -> Compose {
-        Compose { to: to.to_string(), input: TextInput::new(Mode::Sentence), atts: Vec::new(), force_sms: false, last_len: 0 }
+        Compose { to: to.to_string(), reply: false, input: TextInput::new(Mode::Sentence), atts: Vec::new(), force_sms: false, last_len: 0 }
     }
 
     fn transport(&self, c: &Core) -> Transport {
@@ -856,7 +892,7 @@ impl Screen for Compose {
         Some(&self.to)
     }
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = trunc(&format!("To {}", c.name_for(&self.to)), W);
+        f.title = trunc(&tf(c, "To {}", &[&c.name_for(&self.to)]), W);
         let info = match self.transport(c) {
             Transport::Sms => {
                 let (coding, segs) = sms::segment_text(&self.input.text);
@@ -869,11 +905,12 @@ impl Screen for Compose {
                 let used = segs.last().map(|s| if coding == sms::Coding::Gsm7 { crate::gsm7::encode(s).map(|v| v.len()).unwrap_or(0) } else { s.encode_utf16().count() }).unwrap_or(0);
                 format!("SMS {}/{} ({})", used, per, segs.len().max(1))
             }
-            Transport::Mms if self.to.starts_with(crate::services::GROUP_PREFIX) => "Group MMS".to_string(),
-            Transport::Mms => format!("MMS · {} attachment{}", self.atts.len(), if self.atts.len() > 1 { "s" } else { "" }),
-            Transport::Rcs if self.to.starts_with(crate::services::GROUP_PREFIX) => "Group chat".to_string(),
-            Transport::Rcs if !self.atts.is_empty() => "Chat · file".to_string(),
-            Transport::Rcs => "Chat message".to_string(),
+            Transport::Mms if self.to.starts_with(crate::services::GROUP_PREFIX) => t(c, "Group MMS").to_string(),
+            Transport::Mms if self.atts.len() == 1 => t(c, "MMS · 1 attachment").to_string(),
+            Transport::Mms => tf(c, "MMS · {} attachments", &[&self.atts.len().to_string()]),
+            Transport::Rcs if self.to.starts_with(crate::services::GROUP_PREFIX) => t(c, "Group chat").to_string(),
+            Transport::Rcs if !self.atts.is_empty() => t(c, "Chat · file").to_string(),
+            Transport::Rcs => t(c, "Chat message").to_string(),
         };
         f.line(&format!("{:>w$}", format!("{} {}", info, self.input.mode_label()), w = W));
         let mut lines = self.input.lines(W, c.now);
@@ -884,7 +921,7 @@ impl Screen for Compose {
         for l in lines.iter().skip(start) {
             f.line(l);
         }
-        f.soft("Options", "Send", if self.input.text.is_empty() { "Back" } else { "Clear" });
+        f.soft(t(c, "Options"), t(c, "Send"), if self.input.text.is_empty() { t(c, "Back") } else { t(c, "Clear") });
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -901,6 +938,7 @@ impl Screen for Compose {
                 return Nav::Pop;
             }
             _ => {
+                self.input.lang = c.settings.language;
                 self.input.key(k, c.now);
             }
         }
@@ -936,7 +974,11 @@ impl Compose {
         }
         let text = self.input.text.clone();
         c.send_message(&self.to, &text, core::mem::take(&mut self.atts), self.force_sms);
-        Nav::Replace(Box::new(ThreadView::new(&self.to)))
+        if self.reply {
+            Nav::Pop
+        } else {
+            Nav::Replace(Box::new(ThreadView::new(&self.to)))
+        }
     }
 }
 
@@ -955,15 +997,15 @@ pub struct Contacts {
 
 impl Screen for Contacts {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Contacts".into();
-        let mut items = vec!["+ Add contact".to_string()];
+        f.title = t(c, "Contacts").into();
+        let mut items = vec![t(c, "+ Add contact").to_string()];
         for i in sorted_contacts(c) {
             let x = &c.contacts[i];
             let badge = if c.peer_rcs(&x.number) == Some(true) { " ◆" } else { "" };
             items.push(format!("{}{}", x.name, badge));
         }
         list(f, &items, self.sel, ROWS);
-        f.soft("Message", "Open", "Back");
+        f.soft(t(c, "Message"), t(c, "Open"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         let order = sorted_contacts(c);
@@ -1008,18 +1050,26 @@ impl Screen for ContactView {
         };
         f.title = x.name.clone();
         f.line(&center(&x.number, W));
-        let chat = match c.peer_rcs(&x.number) {
+        let chat = t(c, match c.peer_rcs(&x.number) {
             Some(true) => "Chat: available",
             Some(false) => "Chat: not available",
             None => "Chat: unknown",
-        };
+        });
         f.line(&center(chat, W));
         f.line(&"─".repeat(W));
-        let items: Vec<String> = CONTACT_ACTIONS.iter().map(|s| s.to_string()).collect();
+        let items: Vec<String> = CONTACT_ACTIONS.iter().map(|s| t(c, s).to_string()).collect();
         list(f, &items, self.sel, ROWS - 3);
-        f.soft("", "Select", "Back");
+        f.soft("", t(c, "Select"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
+        // number keys pick an action directly, like in menus
+        let k = match k {
+            Key::Num(d @ '1'..='5') => {
+                self.sel = d as usize - '1' as usize;
+                Key::Ok
+            }
+            k => k,
+        };
         if nav_list(k, &mut self.sel, CONTACT_ACTIONS.len()) {
             return Nav::Stay;
         }
@@ -1051,12 +1101,16 @@ impl Screen for ContactView {
                 Nav::Stay
             }
             3 => Nav::Replace(Box::new(ContactEdit::new(Some(self.idx), &x.name, &x.number))),
-            _ => {
-                c.contacts.remove(self.idx);
-                c.toast("Contact deleted");
-                Nav::Pop
-            }
+            _ => push(Menu::new("Delete contact?", &["Delete", "Cancel"], 8)),
         }
+    }
+    fn result(&mut self, c: &mut Core, i: usize, tag: u32) -> Nav {
+        if tag == 8 && i == 0 && self.idx < c.contacts.len() {
+            c.contacts.remove(self.idx);
+            c.toast("Contact deleted");
+            return Nav::Pop;
+        }
+        Nav::Stay
     }
 }
 
@@ -1079,16 +1133,16 @@ impl ContactEdit {
 
 impl Screen for ContactEdit {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = if self.idx.is_some() { "Edit contact".into() } else { "New contact".into() };
-        f.line(&format!("Name: ({})", self.name.mode_label()));
+        f.title = t(c, if self.idx.is_some() { "Edit contact" } else { "New contact" }).into();
+        f.line(&tf(c, "Name: ({})", &[self.name.mode_label()]));
         for l in self.name.lines(W - 1, if self.field == 0 { c.now } else { u64::MAX }).iter().take(2) {
             f.line(&format!(" {}", if self.field == 0 { l.clone() } else { l.trim_end_matches('_').to_string() }));
         }
         f.line("");
-        f.line("Number:");
+        f.line(t(c, "Number:"));
         f.line(&format!(" {}{}", self.number.text, if self.field == 1 { "_" } else { "" }));
         f.sel = Some(if self.field == 0 { 1 } else { 4 });
-        f.soft("", "Save", "Clear");
+        f.soft("", t(c, "Save"), t(c, "Clear"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -1112,6 +1166,7 @@ impl Screen for ContactEdit {
             }
             _ => {
                 let inp = if self.field == 0 { &mut self.name } else { &mut self.number };
+                inp.lang = c.settings.language;
                 let k = match k {
                     Key::Char('+') if self.field == 1 => Key::Char('+'),
                     Key::Char(_) if self.field == 1 => return Nav::Stay,
@@ -1135,10 +1190,10 @@ pub struct CallLog {
 
 impl Screen for CallLog {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Call log".into();
+        f.title = t(c, "Call log").into();
         if c.log.is_empty() {
             f.line("");
-            f.line(&center("No calls yet", W));
+            f.line(&center(t(c, "No calls yet"), W));
         }
         let items: Vec<String> = c
             .log
@@ -1156,7 +1211,7 @@ impl Screen for CallLog {
             })
             .collect();
         list(f, &items, self.sel, ROWS);
-        f.soft("Message", "Call", "Back");
+        f.soft(t(c, "Message"), t(c, "Call"), t(c, "Back"));
     }
     fn tick(&mut self, c: &mut Core) -> Nav {
         c.missed = 0;
@@ -1192,7 +1247,7 @@ pub struct ClockApp {
 
 impl Screen for ClockApp {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Clock".into();
+        f.title = t(c, "Clock").into();
         let d = util::civil_from_unix(c.local());
         for r in big_time(&hhmm(c.local())) {
             f.line(&r);
@@ -1200,9 +1255,13 @@ impl Screen for ClockApp {
         f.line(&center(&format!("{:02}:{:02}:{:02}  UTC{:+}", d.hour, d.min, d.sec, c.tz_q as i32 / 4), W));
         f.line("");
         let (h, m) = c.settings.alarm.unwrap_or((7, 0));
-        let items = vec![format!("Alarm {:02}:{:02}  [{}]", h, m, on_off(c.settings.alarm_on)), "Set alarm time".to_string(), "Stopwatch".to_string()];
+        let items = vec![
+            tf(c, "Alarm {}  [{}]", &[&format!("{:02}:{:02}", h, m), on_off(c, c.settings.alarm_on)]),
+            t(c, "Set alarm time").to_string(),
+            t(c, "Stopwatch").to_string(),
+        ];
         list(f, &items, self.sel, 5);
-        f.soft("", "Select", "Back");
+        f.soft("", t(c, "Select"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         if nav_list(k, &mut self.sel, 3) {
@@ -1229,8 +1288,8 @@ pub struct AlarmSet {
 }
 
 impl Screen for AlarmSet {
-    fn render(&self, _c: &Core, f: &mut Frame) {
-        f.title = "Set alarm".into();
+    fn render(&self, c: &Core, f: &mut Frame) {
+        f.title = t(c, "Set alarm").into();
         let mut s: Vec<char> = "--:--".chars().collect();
         for (i, d) in self.digits.chars().enumerate() {
             s[if i < 2 { i } else { i + 1 }] = d;
@@ -1241,8 +1300,8 @@ impl Screen for AlarmSet {
         }
         f.line(&center(&s.iter().collect::<String>(), W));
         f.line("");
-        f.line(&center("Type HHMM (24h)", W));
-        f.soft("", "Save", "Clear");
+        f.line(&center(t(c, "Type HHMM (24h)"), W));
+        f.soft("", t(c, "Save"), t(c, "Clear"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -1261,7 +1320,8 @@ impl Screen for AlarmSet {
                 }
                 c.settings.alarm = Some((h, m));
                 c.settings.alarm_on = true;
-                c.toast(&format!("Alarm set for {:02}:{:02}", h, m));
+                let m = tf(c, "Alarm set for {}", &[&format!("{:02}:{:02}", h, m)]);
+                c.toast(&m);
                 return Nav::Pop;
             }
             _ => {}
@@ -1277,14 +1337,15 @@ impl Screen for AlarmRing {
         true
     }
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Alarm".into();
+        f.title = t(c, "Alarm").into();
         f.line("");
         for r in big_time(&hhmm(c.local())) {
             f.line(&r);
         }
         f.line("");
-        f.line(&center(if (c.now / 500) % 2 == 0 { "♪ ♫ WAKE UP ♫ ♪" } else { "♫ ♪ WAKE UP ♪ ♫" }, W));
-        f.soft("Snooze", "Stop", "");
+        let w = t(c, "WAKE UP");
+        f.line(&center(&if (c.now / 500) % 2 == 0 { format!("♪ ♫ {} ♫ ♪", w) } else { format!("♫ ♪ {} ♪ ♫", w) }, W));
+        f.soft(t(c, "Snooze"), t(c, "Stop"), "");
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -1322,15 +1383,15 @@ fn fmt_sw(ms: u64) -> String {
 
 impl Screen for Stopwatch {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Stopwatch".into();
+        f.title = t(c, "Stopwatch").into();
         let e = self.elapsed(c.now);
         f.line("");
         f.line(&center(&fmt_sw(e), W));
         f.line("");
         for (i, l) in self.laps.iter().enumerate().rev().take(6) {
-            f.line(&center(&format!("Lap {}  {}", i + 1, fmt_sw(*l)), W));
+            f.line(&center(&tf(c, "Lap {}  {}", &[&(i + 1).to_string(), &fmt_sw(*l)]), W));
         }
-        f.soft(if self.start.is_some() { "Lap" } else { "Reset" }, if self.start.is_some() { "Stop" } else { "Start" }, "Back");
+        f.soft(if self.start.is_some() { t(c, "Lap") } else { t(c, "Reset") }, if self.start.is_some() { t(c, "Stop") } else { t(c, "Start") }, t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
         match k {
@@ -1417,17 +1478,18 @@ fn fmt_num(v: f64) -> String {
 }
 
 impl Screen for Calculator {
-    fn render(&self, _c: &Core, f: &mut Frame) {
-        f.title = "Calculator".into();
+    fn render(&self, c: &Core, f: &mut Frame) {
+        f.title = t(c, "Calculator").into();
         f.line("");
         for l in wrap(if self.expr.is_empty() { "0" } else { &self.expr }, W - 2).iter().rev().take(3).rev() {
             f.line(&format!("{:>w$}", l, w = W - 1));
         }
-        f.line(&format!("{:>w$}", self.result.as_deref().map(|r| format!("= {}", r)).unwrap_or_default(), w = W - 1));
+        let r = self.result.as_deref().map(|r| if r == "Error" { t(c, "Error").to_string() } else { format!("= {}", r) }).unwrap_or_default();
+        f.line(&format!("{:>w$}", r, w = W - 1));
         f.line("");
         f.line("  ↑ +    ↓ −    * .");
         f.line("  ← ×    → ÷    OK =");
-        f.soft("", "=", "Clear");
+        f.soft("", "=", t(c, "Clear"));
     }
     fn key(&mut self, _c: &mut Core, k: Key) -> Nav {
         let op = |e: &mut String, o: char| {
@@ -1478,35 +1540,38 @@ pub struct SettingsScreen {
     sel: usize,
 }
 
+const SETTINGS_COUNT: usize = 14;
+
 impl SettingsScreen {
     fn items(c: &Core) -> Vec<String> {
         let s = &c.settings;
         vec![
-            format!("Network: {}", s.net_mode.label()),
-            format!("Airplane mode: {}", on_off(s.airplane)),
-            format!("Chat features: {}", on_off(s.rcs)),
-            format!(" Status: {}", c.rcs.state.label()),
-            format!("Delivery reports: {}", on_off(s.delivery_reports)),
-            format!("Read receipts: {}", on_off(s.read_receipts)),
-            format!("Typing indicator: {}", on_off(s.typing_indicators)),
-            format!("Ringtone: {}", on_off(s.ringer)),
-            "Phone status".to_string(),
-            "AT command log".to_string(),
-            "About".to_string(),
-            "Restart phone".to_string(),
-            "Power off".to_string(),
+            tf(c, "Language: {}", &[s.language.native_name()]),
+            tf(c, "Network: {}", &[t(c, s.net_mode.label())]),
+            tf(c, "Airplane mode: {}", &[on_off(c, s.airplane)]),
+            tf(c, "Chat features: {}", &[on_off(c, s.rcs)]),
+            tf(c, " Status: {}", &[t(c, c.rcs.state.label())]),
+            tf(c, "Delivery reports: {}", &[on_off(c, s.delivery_reports)]),
+            tf(c, "Read receipts: {}", &[on_off(c, s.read_receipts)]),
+            tf(c, "Typing indicator: {}", &[on_off(c, s.typing_indicators)]),
+            tf(c, "Ringtone: {}", &[on_off(c, s.ringer)]),
+            t(c, "Phone status").to_string(),
+            t(c, "AT command log").to_string(),
+            t(c, "About").to_string(),
+            t(c, "Restart phone").to_string(),
+            t(c, "Power off").to_string(),
         ]
     }
 }
 
 impl Screen for SettingsScreen {
     fn render(&self, c: &Core, f: &mut Frame) {
-        f.title = "Settings".into();
+        f.title = t(c, "Settings").into();
         list(f, &Self::items(c), self.sel, ROWS);
-        f.soft("", "Change", "Back");
+        f.soft("", t(c, "Change"), t(c, "Back"));
     }
     fn key(&mut self, c: &mut Core, k: Key) -> Nav {
-        if nav_list(k, &mut self.sel, 13) {
+        if nav_list(k, &mut self.sel, SETTINGS_COUNT) {
             return Nav::Stay;
         }
         if k == Key::Back {
@@ -1517,32 +1582,32 @@ impl Screen for SettingsScreen {
         }
         let s = &mut c.settings;
         match self.sel {
-            0 => return push(Menu::new("Network mode", &["5G/4G auto", "4G only", "5G only"], 4)),
-            1 => {
+            0 => {
+                let names: Vec<&str> = Lang::ALL.iter().map(|l| l.native_name()).collect();
+                return push(Menu::new("Language", &names, 10));
+            }
+            1 => return push(Menu::new("Network mode", &["5G/4G auto", "4G only", "5G only"], 4)),
+            2 => {
                 let on = !s.airplane;
                 c.set_airplane(on);
             }
-            2 | 3 => {
+            3 => {
                 let on = !s.rcs;
                 c.set_rcs(on);
             }
-            4 => s.delivery_reports = !s.delivery_reports,
-            5 => s.read_receipts = !s.read_receipts,
-            6 => s.typing_indicators = !s.typing_indicators,
-            7 => s.ringer = !s.ringer,
-            8 => return push(MsgBox::lines("Phone status", status_lines(c))),
-            9 => {
+            4 => {}
+            5 => s.delivery_reports = !s.delivery_reports,
+            6 => s.read_receipts = !s.read_receipts,
+            7 => s.typing_indicators = !s.typing_indicators,
+            8 => s.ringer = !s.ringer,
+            9 => return push(MsgBox::lines("Phone status", status_lines(c))),
+            10 => {
                 let lines: Vec<String> = c.modem.trace.iter().rev().take(40).flat_map(|l| wrap(l, W)).collect();
-                return push(MsgBox::lines("AT log (newest)", lines));
+                return push(MsgBox::lines("AT command log", lines));
             }
-            11 => return push(Menu::new("Restart phone?", &["Restart", "Cancel"], 6)),
-            12 => return push(Menu::new("Power off?", &["Power off", "Cancel"], 7)),
-            _ => {
-                return push(MsgBox::new(
-                    "About",
-                    "Tranquility OS 0.1\nA tiny Rust kernel for dumbphones.\n\nVoice (VoLTE/VoNR), SMS, MMS 1.3, RCS chat, USSD, cell broadcast alerts, 4G/5G.\n\nNo Linux, no Android.",
-                ))
-            }
+            11 => return push(MsgBox::new("About", t(c, i18n::ABOUT))),
+            12 => return push(Menu::new("Restart phone?", &["Restart", "Cancel"], 6)),
+            _ => return push(Menu::new("Power off?", &["Power off", "Cancel"], 7)),
         }
         Nav::Stay
     }
@@ -1551,6 +1616,7 @@ impl Screen for SettingsScreen {
             (4, _) => c.set_net_mode([NetMode::Auto5g, NetMode::Lte, NetMode::Nr][i.min(2)]),
             (6, 0) => c.power_request = Some(crate::services::Power::Restart),
             (7, 0) => c.power_request = Some(crate::services::Power::Off),
+            (10, _) => c.settings.language = Lang::ALL[i.min(Lang::ALL.len() - 1)],
             _ => {}
         }
         Nav::Stay

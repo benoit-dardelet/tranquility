@@ -26,7 +26,7 @@ impl Decoder {
                     return None;
                 }
                 self.st = 0;
-                return Some(Key::End);
+                return Some(Key::Exit);
             }
             2 => {
                 self.st = if b.is_ascii_digit() { 3 } else { 0 };
@@ -79,11 +79,11 @@ impl Decoder {
         }
     }
 
-    /// A lone ESC (no sequence following) is the red End key.
+    /// A lone ESC (no sequence following) leaves the current screen.
     pub fn flush(&mut self, now: u64) -> Option<Key> {
         if self.st == 1 && now.saturating_sub(self.esc_at) > 60 {
             self.st = 0;
-            return Some(Key::End);
+            return Some(Key::Exit);
         }
         None
     }

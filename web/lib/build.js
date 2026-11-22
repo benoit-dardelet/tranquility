@@ -54,8 +54,20 @@ export function deviceTree(dev) {
   return buildDtb(root);
 }
 
-/** Kernel + appended DTB (what these bootloaders expect), wrapped in a v0 boot image. */
+async function gunzip(gz) {
+  const stream = new Blob([gz]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * Qualcomm Pixels: kernel + appended DTB in a v0 boot image (what their
+ * bootloaders expect). Tensor Pixels: raw kernel in a v4 boot image, with the
+ * display address on the command line (their bootloader supplies the DTB).
+ */
 export async function bootImage(dev, imageGz) {
+  if (dev.boot.headerVersion >= 3) {
+    return buildBootImg({ kernel: dev.boot.rawKernel ? await gunzip(imageGz) : imageGz, ramdisk: emptyCpio(), headerVersion: dev.boot.headerVersion, cmdline: dev.boot.cmdline });
+  }
   const dtb = deviceTree(dev);
   const b = dev.boot;
   let kernel = imageGz;

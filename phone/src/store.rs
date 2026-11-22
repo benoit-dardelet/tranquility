@@ -186,6 +186,7 @@ impl Core {
                 e.s(&m.from);
             }
         }
+        e.u(self.settings.language.code() as u64);
         e.buf
     }
 
@@ -276,6 +277,8 @@ impl Core {
             }
             threads.push(Thread { number, msgs, typing_until: 0, members, group_name, typing_who: String::new() });
         }
+        // added later: snapshots from older versions end here
+        st.language = d.u().map(crate::ui::i18n::Lang::from_code).unwrap_or_default();
         self.settings = st;
         self.contacts = contacts;
         self.log = log;

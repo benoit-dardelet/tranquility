@@ -1,5 +1,5 @@
 import { Fastboot, FastbootError } from "./lib/fastboot.js";
-import { DEVICES } from "./lib/devices.js";
+import { DEVICES, NOT_YET } from "./lib/devices.js";
 import { bootImage } from "./lib/build.js";
 
 const $ = (id) => document.getElementById(id);
@@ -23,11 +23,18 @@ function renderDevices() {
     b.setAttribute("role", "radio");
     b.setAttribute("aria-checked", "false");
     const [cls, txt] = unlockTag[d.unlock];
-    b.innerHTML = `<span class="name"></span><span class="meta"></span><span class="tag ${cls}">${txt}</span> <span class="tag mid">untested</span>${d.dt.ramoops ? ' <span class="tag good">keeps data</span>' : ""}`;
+    const tryTag = d.tryIt === "maybe" ? ' <span class="tag mid">install only?</span>' : "";
+    b.innerHTML = `<span class="name"></span><span class="meta"></span><span class="tag ${cls}">${txt}</span> <span class="tag mid">untested</span>${tryTag}`;
     b.querySelector(".name").textContent = d.name;
     b.querySelector(".meta").textContent = `${d.soc} · ${d.year} · ${d.price}`;
     b.addEventListener("click", () => selectDevice(d, b));
     box.appendChild(b);
+  }
+  const ny = $("notyet");
+  for (const [name, year] of NOT_YET) {
+    const li = document.createElement("li");
+    li.textContent = `${name} (${year})`;
+    ny.appendChild(li);
   }
   const saved = (() => {
     try {
@@ -45,6 +52,11 @@ function selectDevice(d, el) {
   for (const c of $("devices").children) c.setAttribute("aria-checked", String(c === el));
   $("keys").textContent = d.fastbootKeys;
   $("unlock-note").textContent = d.unlockNote;
+  const notes = [];
+  if (d.tryIt === "maybe") notes.push("Tensor Pixels may refuse “Try it” (fastboot boot). If they do, only Install works, and Restore puts Android back.");
+  if (d.note) notes.push(d.note);
+  $("device-note").textContent = notes.join(" ");
+  $("device-note").hidden = !notes.length;
   try {
     localStorage.setItem("tq-device", d.id);
   } catch {
@@ -186,7 +198,14 @@ $("unlock").addEventListener("click", () =>
 $("try").addEventListener("click", () =>
   guarded("Try it", async () => {
     const img = await buildImage();
-    await state.fb.boot(img, progress);
+    try {
+      await state.fb.boot(img, progress);
+    } catch (e) {
+      if (e instanceof FastbootError && /unknown|not supported|unrecognized|invalid/i.test(e.message)) {
+        throw new Error(`this Pixel's bootloader doesn't allow booting from RAM (${e.message}). Use Install instead, after getting your stock boot.img for Restore.`);
+      }
+      throw e;
+    }
     log("Booting Tranquility from RAM. Hold power ~10 s to return to Android.");
     afterReboot();
   }),

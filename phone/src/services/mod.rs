@@ -223,6 +223,7 @@ pub struct Settings {
     pub alarm_on: bool,
     pub ims_password: String,
     pub ringer: bool,
+    pub language: crate::ui::i18n::Lang,
 }
 
 impl Default for Settings {
@@ -238,6 +239,7 @@ impl Default for Settings {
             alarm_on: false,
             ims_password: crate::sim::IMS_PASSWORD.into(),
             ringer: true,
+            language: crate::ui::i18n::Lang::En,
         }
     }
 }
@@ -377,8 +379,14 @@ impl Core {
         self.next_msg = n.max(max + 1);
     }
 
+    /// Translate a UI string into the phone's language.
+    pub fn t(&self, s: &'static str) -> &'static str {
+        crate::ui::i18n::tr(self.settings.language, s)
+    }
+
     pub fn toast(&mut self, s: &str) {
-        self.events.push_back(Event::Toast(s.to_string()));
+        let s = crate::ui::i18n::tr_dyn(self.settings.language, s);
+        self.events.push_back(Event::Toast(s));
     }
 
     // ------------------------------------------------------------ boot
@@ -607,7 +615,7 @@ impl Core {
             }
             "+CUSD" => {
                 let a = split_args(val);
-                let text = a.get(1).cloned().unwrap_or_else(|| "USSD session ended".into());
+                let text = a.get(1).cloned().unwrap_or_else(|| self.t("USSD session ended").into());
                 self.events.push_back(Event::Ussd(text));
             }
             "+QIOPEN" => {
@@ -762,7 +770,8 @@ impl Core {
     pub fn ussd(&mut self, code: &str) {
         let r = self.modem.cmd(&format!("AT+CUSD=1,\"{}\",15", code));
         if !r.ok {
-            self.events.push_back(Event::Ussd("USSD request failed".into()));
+            let m = self.t("USSD request failed").to_string();
+            self.events.push_back(Event::Ussd(m));
         }
     }
 

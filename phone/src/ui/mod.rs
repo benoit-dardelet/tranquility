@@ -7,6 +7,7 @@ use crate::store::Storage;
 use crate::util::{self, center, char_len, pad};
 
 pub mod font;
+pub mod i18n;
 pub mod raster;
 pub mod screens;
 pub mod t9;
@@ -34,6 +35,8 @@ pub enum Key {
     End,
     /// left soft key (options)
     Opt,
+    /// leave the current screen no matter what (Esc on a keyboard)
+    Exit,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -156,7 +159,8 @@ impl Phone {
     }
 
     fn toast(&mut self, s: &str) {
-        self.toast = Some((s.to_string(), self.core.now + 2500));
+        let s = i18n::tr_dyn(self.core.settings.language, s);
+        self.toast = Some((s, self.core.now + 2500));
     }
 
     fn apply(&mut self, nav: Nav) {
@@ -204,6 +208,25 @@ impl Phone {
             }
             return;
         }
+        if k == Key::Exit {
+            // Leave the current screen even if it has text in it. Never
+            // leaves the SIM PIN prompt or a call; stops a ringing alarm.
+            let top = match self.stack.last() {
+                Some(t) => t,
+                None => return,
+            };
+            if top.is_call() || self.core.sim_locked || self.stack.len() <= 1 {
+                return;
+            }
+            if top.is_alarm() {
+                self.core.alarm_ringing = false;
+            }
+            if let Some(t) = top.thread().map(|t| t.to_string()) {
+                self.core.rcs_composing(&t, false);
+            }
+            self.stack.pop();
+            return;
+        }
         if let Key::Num(d) = k {
             self.sound.cue(crate::audio::Cue::Key(d));
         }
@@ -247,6 +270,7 @@ impl Phone {
                     }
                     let who = self.core.name_for(&number);
                     self.sound.cue(if reason == "Busy" { crate::audio::Cue::Busy } else { crate::audio::Cue::CallEnd });
+                    let reason = i18n::tr_dyn(self.core.settings.language, &reason);
                     let msg = if secs > 0 { format!("{} {}", reason, util::duration(secs)) } else { format!("{}: {}", reason, who) };
                     self.toast(&msg);
                 }
@@ -256,9 +280,10 @@ impl Phone {
                         self.sound.cue(crate::audio::Cue::Message);
                     }
                     if !viewing && !self.stack.last().is_some_and(|s| s.is_call()) {
-                        let kind = if transport == Transport::Mms { "MMS" } else { "Message" };
                         let who = self.core.name_for(&number);
-                        self.toast(&format!("{} from {}", kind, who));
+                        let l = self.core.settings.language;
+                        let msg = i18n::fill(i18n::tr(l, if transport == Transport::Mms { "MMS from {}" } else { "Message from {}" }), &[&who]);
+                        self.toast(&msg);
                     }
                 }
                 Event::Ussd(t) => self.stack.push(Box::new(screens::MsgBox::new("Network", &t))),
@@ -355,8 +380,8 @@ pub fn ansi(f: &Frame) -> String {
     s.push_str(&format!("│\x1b[1m{}\x1b[0m│\x1b[K\r\n", soft));
     s.push_str(&format!("└{}┘\x1b[K\r\n", bar));
     s.push_str("\x1b[K\r\n");
-    s.push_str(" [ ] soft key   Enter OK\x1b[K\r\n");
-    s.push_str(" Bksp back  Tab call  ` end\x1b[K\r\n");
+    s.push_str(" [ ] soft key  Enter OK  ` end\x1b[K\r\n");
+    s.push_str(" Bksp clear Esc back Tab call\x1b[K\r\n");
     s.push_str(" 0-9 * # keypad  arrows nav\x1b[K\r\n");
     s.push_str("\x1b[J");
     s

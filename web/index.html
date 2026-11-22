@@ -4,25 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Tranquility Installer</title>
-  <meta name="description" content="Install the Tranquility dumbphone OS on a bootloader-unlockable Android phone, from your browser.">
+  <meta name="description" content="Install the Tranquility dumbphone OS on a Google Pixel, from your browser.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="top">
     <div class="wrap">
       <h1>Tranquility <span class="muted">installer</span></h1>
-      <p class="lede">A tiny dumbphone OS written in Rust. Try it on a cheap, unlockable Android phone, straight from this page.</p>
+      <p class="lede">A tiny dumbphone OS written in Rust. Try it on a Google Pixel, straight from this page.</p>
     </div>
   </header>
 
   <main class="wrap">
     <section class="banner warn" role="note">
-      <strong>Experimental: not yet tested on real phones.</strong>
-      On a phone it can boot and draw its interface through the bootloader's display, then run a short demo.
-      There are no drivers yet for the phone's modem, buttons, touchscreen, sound or flash storage, so it can't make real
-      calls or texts there. On phones marked <em>keeps data</em>, messages and contacts survive a restart from
-      Settings → Restart (kept in RAM the phone preserves across restarts), but not a power-off.
-      Start with <em>Try it</em>, which changes nothing on the phone.
+      <strong>Experimental: not yet tested on a real Pixel.</strong>
+      On the phone it boots and draws its interface through the bootloader's display, then runs a short demo.
+      There are no drivers yet for the Pixel's modem, buttons, touchscreen, sound or storage, so it can't make real
+      calls or texts, and nothing is kept after a restart. Start with <em>Try it</em>, which changes nothing on the phone.
     </section>
 
     <section id="nousb" class="banner bad" hidden>
@@ -33,8 +31,14 @@
 
     <ol class="steps">
       <li class="step" id="step-device">
-        <h2>Pick your phone</h2>
-        <div id="devices" class="devices" role="radiogroup" aria-label="Phone model"></div>
+        <h2>Pick your Pixel</h2>
+        <div id="devices" class="devices" role="radiogroup" aria-label="Pixel model"></div>
+        <p id="device-note" class="small muted" hidden></p>
+        <details class="small">
+          <summary>Other Pixels</summary>
+          <p>Not supported yet: there's no open description of their display and boot layout to build a safe image from.</p>
+          <ul id="notyet"></ul>
+        </details>
       </li>
 
       <li class="step" id="step-prepare">
@@ -42,7 +46,7 @@
         <ul class="checklist">
           <li>Back up anything you care about. Unlocking the bootloader <strong>erases the phone</strong>.</li>
           <li>Charge it to at least 50%.</li>
-          <li>In Android: Settings → About phone → tap <em>Build number</em> 7 times, then Settings → System → Developer options → turn on <em>OEM unlocking</em>.</li>
+          <li>In Android: Settings → About phone → tap <em>Build number</em> 7 times, then Settings → System → Developer options → turn on <em>OEM unlocking</em>. If it's greyed out, the phone is carrier-locked and can't be used.</li>
           <li>Put the phone in fastboot mode: <span id="keys">pick a phone above</span> Or, with USB debugging on: <code>adb reboot bootloader</code></li>
           <li>Connect it to this computer with a data USB cable.</li>
         </ul>
@@ -106,7 +110,7 @@
   </main>
 
   <footer class="wrap muted small">
-    Boot parameters come from postmarketOS device data; display and memory maps from mainline Linux device trees.
+    Boot parameters come from postmarketOS device data; display and memory maps from mainline Linux device trees. Google and Pixel are trademarks of Google LLC; this project isn't affiliated with Google.
     Unlocking voids some warranties. You are responsible for your device.
   </footer>
 

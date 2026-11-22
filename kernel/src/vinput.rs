@@ -80,7 +80,8 @@ fn map(code: u16, shift: bool) -> Option<Key> {
         (28, _) | (96, _) => Key::Ok,
         (14, _) => Key::Back,
         (15, _) => Key::Call,
-        (1, _) | (41, _) => Key::End,
+        (1, _) => Key::Exit,
+        (41, _) | (107, _) => Key::End, // ` and the End key
         (26, _) | (27, _) => Key::Opt,
         (103, _) => Key::Up,
         (108, _) => Key::Down,

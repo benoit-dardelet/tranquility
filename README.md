@@ -3,9 +3,9 @@
 A dumbphone OS written from scratch in Rust: a small bare-metal aarch64
 kernel plus a `no_std` phone stack covering 4G/5G, voice with call audio,
 SMS, MMS, RCS chat (1:1 and group, with file transfer) and the usual
-feature-phone apps. Data is saved to disk. A web installer flashes it onto
-cheap, bootloader-unlockable Android phones over WebUSB. It doesn't use
-Linux, Android or any third-party crates.
+feature-phone apps, in six languages. Data is saved to disk. A web
+installer puts it on Google Pixel phones over WebUSB. It doesn't use Linux,
+Android or any third-party crates.
 
 ![Tranquility on a framebuffer](docs/screen.png)
 
@@ -29,82 +29,89 @@ has no PulseAudio/PipeWire, use `make run AUDIO=none`.
 | `0`-`9` `*` `#`| keypad (multi-tap text, `#` changes case/mode) |
 | arrows         | d-pad                          |
 | Enter          | OK / centre key                |
-| Backspace      | Back / clear                   |
+| Backspace      | Back / clear (deletes in text fields) |
+| Esc            | leave the screen, even with text in it |
 | `[` or `]`     | left soft key (Options)        |
 | Tab            | green Call key                 |
-| `` ` `` or Esc | red End key                    |
+| `` ` `` or End | red End key (back to the idle screen) |
 | letters        | typed straight into text fields |
 
-## Installing on a phone
+## Installing on a Pixel
 
 `make web` builds a static site in `web/dist`. Deploy it to any HTTPS host,
 or use the included GitHub Actions workflow, which publishes it to GitHub
-Pages from the default branch (enable *Settings → Pages → Source: GitHub Actions*; private repositories need a paid GitHub plan for Pages).
+Pages from the default branch. Enable *Settings → Pages → Source: GitHub
+Actions*; private repositories need a paid GitHub plan for Pages.
 Open it in Chrome, Edge or another Chromium browser. The site walks you
-through choosing the phone, preparing it and connecting over USB, then
+through choosing the Pixel, preparing it and connecting over USB, then
 offers four actions:
 
-- **Unlock** — the bootloader, where the phone allows it.
+- **Unlock** — `fastboot flashing unlock` (wipes the phone).
 - **Try it** — `fastboot boot`: runs from RAM and writes nothing.
 - **Install** — flashes the boot partition of the active slot.
 - **Restore** — flashes your stock `boot.img` back.
 
-Each boot image is built in the browser for the selected phone: the kernel
-`Image.gz` plus a generated device tree, in the boot-image format that phone
-expects.
+Each boot image is built in the browser for the selected model.
 
-| Phone | SoC | Unlock |
+| Pixel | Chip | How it boots |
 |---|---|---|
-| Google Pixel 3a / 3a XL | SDM670 | easy (`fastboot flashing unlock`; not Verizon units) |
-| OnePlus 6 / 6T | SDM845 | easy (`fastboot oem unlock`) |
-| SHIFT6mq | SDM845 | easy |
-| Fairphone 4 | SM7225 | needs a code from Fairphone |
-| Xiaomi Poco F1 | SDM845 | hard (Mi Unlock tool and a waiting period) |
+| Pixel 3 / 3 XL | Snapdragon 845 | header v0, kernel + generated device tree |
+| Pixel 3a / 3a XL | Snapdragon 670 | header v0, kernel + generated device tree |
+| Pixel 6 / 6 Pro | Google Tensor | header v4; uses the phone's own device tree, display address on the command line |
+| Pixel 6a | Google Tensor | as Pixel 6; display address assumed from the Pixel 6 |
 
-Boot parameters come from postmarketOS `deviceinfo`. Framebuffer, GIC,
-board IDs and reserved memory come from the mainline Linux device trees.
+The rest of the line-up (Pixel 1, 2, 4, 4a, 5, 5a, 7, 8, 9 and 10
+families, Fold, Tablet) is listed on the site as **not supported yet**.
+Neither mainline Linux nor postmarketOS describes their display and boot
+layout, and the installer doesn't guess.
 
-### What works on real phones today — read this
+Data sources:
 
-**None of this has been run on real hardware yet.** On a phone, the kernel
+- **Boot parameters:** postmarketOS `deviceinfo`.
+- **Display, GIC, board IDs and reserved memory:** the mainline Linux device
+  trees (`sdm845-google-*`, `sdm670-google-*`, `gs101-*`).
+
+Carrier-locked Pixels (e.g. Verizon models) can't be unlocked. Tensor
+Pixels may refuse *Try it*; the site then explains that only Install works.
+
+### What works on a real Pixel today — read this
+
+**None of this has been run on real hardware yet.** On a Pixel, the kernel
 is designed to:
 
 - boot through the stock bootloader;
-- find the display the bootloader left on (`simple-framebuffer`);
+- find the display the bootloader left on, from the device tree or from
+  `tq.fb=` on the command line;
 - keep its memory out of every reserved firmware region;
 - run the interface. With no input driver, it plays a short scripted demo:
-  unlocks the SIM, receives a chat, answers a call;
-- keep messages, contacts, call log and settings across a restart. It
-  stores them in the RAM region mainline Linux reserves for crash logs
-  ("ramoops"), which phones preserve across a warm reset. This works on the
-  OnePlus 6/6T, SHIFT6mq and Fairphone 4, which define one, and needs
-  **Settings → Restart** (a PSCI warm reset). Holding the power button may
-  do a hard reset that clears RAM, and a power-off always does. The Pixel
-  3a/3a XL and Poco F1 don't keep data yet.
+  unlocks the SIM, receives a chat, answers a call.
 
-Phone hardware drivers don't exist yet: no modem, touchscreen, buttons,
-audio codec or UFS/eMMC flash storage (so nothing survives a power-off). Until they do, the phone side is a demo,
-and it can't place real calls or send real texts. The modem in particular
-is hard: Qualcomm basebands need remoteproc firmware loading and QMI, not
-AT commands over a UART.
+Pixel hardware drivers don't exist yet: no modem, touchscreen, buttons,
+audio codec or UFS/eMMC flash storage. Until they do, the phone side is a
+demo: it can't place real calls or send real texts, and **nothing is kept
+across a restart**. The kernel can keep data in a restart-surviving
+"ramoops" RAM region when the device tree describes one, but mainline gives
+none for these Pixels. Whether a Tensor Pixel's own device tree has one is
+unknown. The modem is the hardest part: Qualcomm and Samsung basebands need
+firmware loading and QMI or IPC, not AT commands over a UART.
 
-One more caveat: some phones' bootloaders may not keep the display
-refreshing after handing over, especially with command-mode panels. If
-*Try it* shows only the boot logo, that's why.
+Some bootloaders may also stop refreshing the display after handing over.
+If *Try it* shows only the boot logo, that's why.
 
-Everything else is exercised in QEMU and in tests:
+What is tested, in QEMU and in tests:
 
-- **Boot path.** The phone path is tested in QEMU with the exact device tree
-  the site generates: GICv3, no serial port, no virtio, display through
-  `simple-framebuffer` only.
+- **Boot path.** QEMU boots with the exact device tree the site generates:
+  GICv3, no serial port, no virtio, display through `simple-framebuffer`
+  only. The Pixel 6 path (no framebuffer in the device tree, `tq.fb=` on the
+  command line) is tested too.
 - **Boot images.** The site's boot images are byte-identical to AOSP
-  `mkbootimg` output (header v0, v1 and v2).
+  `mkbootimg` output for header v0 to v4.
 - **Device trees.** Every generated device tree passes `dtc`.
 
 ## Architecture
 
 ```
-kernel/            bare-metal aarch64, ~2,100 lines
+kernel/            bare-metal aarch64, ~2,200 lines
   boot.rs          arm64 Image header, PIE self-relocation, EL2→EL1, MMU, vectors
   fdt.rs           device-tree parser; platform.rs: discovery + heap placement
   gic.rs           GICv2 and GICv3;  timer.rs: virtual timer tick
@@ -116,7 +123,7 @@ kernel/            bare-metal aarch64, ~2,100 lines
   ramstore.rs psci.rs   restart-surviving RAM storage, restart / power off
   main.rs          init, event loop, demo autopilot, on-screen panics
 
-phone/             no_std + alloc, host-testable, ~10,000 lines
+phone/             no_std + alloc, host-testable, ~11,500 lines
   at.rs            AT command driver (27.007 / 27.005 + TCP socket commands)
   gsm7.rs sms.rs   GSM 03.38, TS 23.040 PDUs, concatenation, ports, reports
   cb.rs            TS 23.041 cell broadcast (emergency alerts)
@@ -126,7 +133,8 @@ phone/             no_std + alloc, host-testable, ~10,000 lines
   audio.rs         tones, ringtones, DTMF, mixer, simulated far-end voice
   store.rs         snapshot format, A/B CRC-protected block storage
   services/        network, calls, SMS, sockets, HTTP, MMS, RCS, file transfer
-  ui/              screens, T9 input, ANSI and framebuffer renderers, font
+  ui/              screens, T9 input, translations (i18n.rs), ANSI and
+                   framebuffer renderers, font
   sim/             simulated baseband + network (SMSC, MMSC, IMS, FT server)
 
 web/               installer, ~1,100 lines, no dependencies or build step
@@ -161,6 +169,10 @@ web/               installer, ~1,100 lines, no dependencies or build step
   CRCs survive a power cut mid-write. In QEMU it goes on a virtio disk. On
   phones it goes in a restart-surviving RAM region. Settings → Restart and
   Power off use PSCI.
+- **Languages.** English, Français, Español, Deutsch, Italiano and
+  Português (Settings → Language, saved with your data). This covers every
+  screen, the dates, and keypad letters with accents (e.g. 3 → d e f é è ê ë
+  in French).
 - **Other.** USSD, `*#06#`, cell-broadcast alerts, clock with alarm and
   snooze, stopwatch, calculator, settings, phone status, AT log.
 
