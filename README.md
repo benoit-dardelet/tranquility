@@ -123,7 +123,7 @@ kernel/            bare-metal aarch64, ~2,200 lines
   ramstore.rs psci.rs   restart-surviving RAM storage, restart / power off
   main.rs          init, event loop, demo autopilot, on-screen panics
 
-phone/             no_std + alloc, host-testable, ~11,500 lines
+phone/             no_std + alloc, host-testable, ~10,700 lines
   at.rs            AT command driver (27.007 / 27.005 + TCP socket commands)
   gsm7.rs sms.rs   GSM 03.38, TS 23.040 PDUs, concatenation, ports, reports
   cb.rs            TS 23.041 cell broadcast (emergency alerts)
